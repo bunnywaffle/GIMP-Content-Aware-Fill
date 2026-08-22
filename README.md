@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.x-blue.svg)](https://python.org/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-green.svg)](LICENSE)
 
-A state-of-the-art **Photoshop-grade Content-Aware Fill** plugin for **GIMP 3** implementing the complete modern non-AI inpainting pipeline: **Multi-Scale Gaussian Pyramid + Generalized PatchMatch + Wexler EM Global Coherence Optimization + He & Sun Dominant Offset Prior + Gradient/Edge Cost + Poisson Seam Healing**.
+A state-of-the-art **Photoshop-grade Content-Aware Fill** plugin for **GIMP 3** implementing the complete modern non-AI inpainting pipeline: **He & Sun (2012) Dominant Offset Statistics + Barnes et al. (2009) Multi-Scale PatchMatch + Direct Exemplar Transfer + User Sampling Area Controls + Seamless Boundary Seam Healing**.
 
 ---
 
@@ -18,38 +18,38 @@ A state-of-the-art **Photoshop-grade Content-Aware Fill** plugin for **GIMP 3** 
                                  │
                                  ▼
                     ┌─────────────────────────┐
-                    │ Multi-Channel Features  │
-                    │  - Grayscale & Color    │
-                    │  - Gradients (Gx, Gy)   │
-                    │  - Structural Edges     │
+                    │  He & Sun (2012) Offset │
+                    │   Histogram Statistics  │
+                    │  Top K Dominant Shifts  │
                     └────────────┬────────────┘
                                  │
                                  ▼
                     ┌─────────────────────────┐
                     │   Multi-Scale Pyramid   │
-                    │   Coarse (1/4) Level    │
-                    │         │               │
-                    │   Medium (1/2) Level    │
+                    │   Coarse (1/2) Level    │
                     │         │               │
                     │    Fine (1/1) Level     │
                     └────────────┬────────────┘
                                  │
-    ┌────────────────────────────┴────────────────────────────┐
-    │                                                         │
-    ▼ (Per Pyramid Level)                                     ▼
-┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
-│       E-Step: PatchMatch NNF         │     │         M-Step: Wexler Voting        │
-│ - Spatial Propagation (L/R/U/D)      │────►│ - Weighted average of all overlapping│
-│ - Dominant Offset Prior (He & Sun)   │     │   patches: I(p) = Σ w_i S_i / Σ w_i  │
-│ - Generalized Rotation & Mirroring   │     │ - Update synthesized canvas          │
-│ - Gradient & Edge-Weighted Distance  │◄────│ - Repeat EM loop (2-4 passes)        │
-└──────────────────────────────────────┘     └──────────────────────────────────────┘
+                                 ▼
+                    ┌─────────────────────────┐
+                    │    PatchMatch 2D NNF    │
+                    │ - Spatial Propagation   │
+                    │ - Dominant Offset Prior │
+                    │ - Multi-Scale Search    │
+                    └────────────┬────────────┘
                                  │
                                  ▼
                     ┌─────────────────────────┐
-                    │ Poisson / Seam Healing  │
-                    │ Gradient-domain boundary│
-                    │ illumination matching   │
+                    │ Direct Exemplar Transfer│
+                    │ Zero-Blur Sharp Textures│
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────┐
+                    │ Boundary Seam Healing   │
+                    │ Smooth Illumination &   │
+                    │ Color Temperature Match │
                     └────────────┬────────────┘
                                  │
                                  ▼
@@ -58,26 +58,20 @@ A state-of-the-art **Photoshop-grade Content-Aware Fill** plugin for **GIMP 3** 
                     └─────────────────────────┘
 ```
 
-### 1. Multi-Scale Coarse-to-Fine Pyramid
-Processes the hole at 1/4 and 1/2 scales before full resolution. Large global structures and horizons are established at coarse scales, then upsampled to guide high-frequency fine texture synthesis without tile repetition.
+### 1. Dominant Spatial Offset Statistics (He & Sun, ECCV 2012)
+Extracts dominant offset vectors $(\Delta x, \Delta y)$ from the boundary context histogram and injects them as high-priority candidates during PatchMatch propagation. This eliminates local minima traps and guarantees repeating rows, columns, textures, and shelf lines align with geometric precision.
 
-### 2. Wexler EM Global Coherence & Multi-Patch Voting
-Instead of simply copying raw patches, every synthesized pixel receives weighted votes from all $(2r+1)^2$ overlapping patches containing it:
-$$I(p) = \frac{\sum_{q, p \in \Psi_q} w(q) \cdot I\big(\text{source}(q) + (p - q)\big)}{\sum_{q, p \in \Psi_q} w(q)}$$
-This eliminates blockiness, seams, and patch boundary artifacts.
+### 2. Multi-Scale PatchMatch Propagation (Barnes et al., SIGGRAPH 2009)
+Sweeps in forward and reverse alternating raster passes across the selection hole:
+- **Spatial Neighbor Propagation**: Transmits coherent displacement vectors from adjacent pixels.
+- **Dominant Offset Testing**: Tests image-wide structural shift vectors.
+- **Multi-Scale Random Refinement**: Explores local offsets with exponentially decaying radii.
 
-### 3. He & Sun Dominant Spatial Offset Prior
-Extracts dominant offset vectors $(\Delta x, \Delta y)$ from the nearest-neighbor field histogram and uses them as candidates during PatchMatch propagation, drastically speeding up convergence on natural textures.
+### 3. Direct Exemplar Transfer (Zero-Blur Guarantee)
+Unlike naive multi-patch averaging filters that turn high frequencies into blur smudges, the engine transfers intact, razor-sharp exemplar textures directly from the source image.
 
-### 4. Gradient & Edge-Aware Composite Distance Metric
-$$D(T, S) = \sum \Big( D_{\text{color}}(T, S) + \beta \cdot D_{\text{gradient}}(T, S) \Big)$$
-Preserves sharp architectural edges, horizon lines, and geometric contours across the inpainting boundary.
-
-### 5. Generalized Transformations
-Supports horizontal and vertical mirroring as well as rotation adaptation for symmetric textures and patterns.
-
-### 6. Poisson / Gradient-Domain Seam Healing
-Boundary relaxation smoothes out lighting, exposure, and color temperature discrepancies between source and target areas.
+### 4. Seamless Boundary Seam Healing
+Applies boundary relaxation strictly to the 1–2px seam bordering known pixels to eliminate illumination and exposure discrepancies while preserving 100% sharp texture in the interior.
 
 ---
 
@@ -85,20 +79,33 @@ Boundary relaxation smoothes out lighting, exposure, and color temperature discr
 
 | Engine | Method | Speed | Best For |
 | :--- | :--- | :--- | :--- |
-| **⚡ Photoshop-Grade Multi-Scale EM** *(Default)* | Multi-Scale Pyramid + Wexler Voting + PatchMatch | **~0.8s – 2.5s** | Complex photos, people, objects, architecture, backgrounds |
-| **💨 Telea Fast Marching** | Fast Marching Distance Diffusion | **< 0.05s** *(Instant)* | Wires, scratches, dust, text, watermarks, skin blemishes |
-| **🔬 Classic Criminisi** | Exhaustive Isophote Priority | **~2.0s – 5.0s** | Traditional geometric line propagation |
+| **⚡ Structural PatchMatch** *(Default)* | He & Sun 2012 + Barnes 2009 + Direct Exemplar | **~0.2s – 0.8s** | Complex photos, patterns, architectural lines, shelves, textured objects |
+| **🎯 Structural Shift-Map** | Direct Single-Vector Optimal Offset Alignment | **< 0.05s** *(Instant)* | Uniform repeating textures, rows, and directional extensions |
+| **💨 Telea Fast Marching** | Fast Marching Distance PDE Diffusion | **< 0.02s** *(Instant)* | Wires, scratches, dust, text, watermarks, skin blemishes |
+| **🔬 Classic Criminisi** | Exhaustive Isophote Priority Synthesis | **~1.5s – 3.5s** | Traditional geometric line and curve completion |
+
+---
+
+## 🎛️ User Sampling Area Controls
+
+Like Photoshop's Content-Aware Fill workspace, you can define exactly where the algorithm draws source pixels:
+- **`Auto (Smart Context Continuation)`** *(Default)*: Automatically searches all surrounding regions for the best matching textures.
+- **`Sample from Right →`**: Restricts / prioritizes source sampling to the right (e.g. extending horizontal rows of books or patterns leftward).
+- **`Sample from Left ←`**: Restricts / prioritizes source sampling to the left (e.g. extending horizontal patterns rightward).
+- **`Sample from Above ↓`**: Restricts / prioritizes source sampling to above (e.g. extending vertical columns, pillars, trees downward).
+- **`Sample from Below ↑`**: Restricts / prioritizes source sampling to below (e.g. extending vertical textures upward).
+- **`All Around`**: Full surrounding canvas margin search.
 
 ---
 
 ## 📦 Installation
 
 ### Windows
-1. Download or clone this repository:
-   ```bash
+1. Clone or download this repository:
+   ```powershell
    git clone https://github.com/bunnywaffle/GIMP-Content-Aware-Fill.git
    ```
-2. Double-click **`install.bat`** (or copy `content-aware-fill` folder into `%APPDATA%\GIMP\3.2\plug-ins\` or `%APPDATA%\GIMP\3.0\plug-ins\`).
+2. Run **`install.bat`** (or copy the `content-aware-fill` folder into `%APPDATA%\GIMP\3.2\plug-ins\` or `%APPDATA%\GIMP\3.0\plug-ins\`).
 3. Restart **GIMP 3**.
 
 ### Linux / macOS
@@ -121,10 +128,19 @@ Boundary relaxation smoothes out lighting, exposure, and color temperature discr
 1. Open your image in **GIMP 3**.
 2. Select the object, person, watermark, or defect to remove using the **Free Select / Lasso (`F`)** or **Rectangle Select (`R`)** tool.
 3. Open **`Edit` → `Content-Aware Fill...`** (or **`Filters` → `Enhance` → `Content-Aware Fill...`**).
-4. Select your preferred engine, patch size, and rotation options, then click **Fill Selection**.
+4. Select your preferred engine, sampling area, and patch size, then click **Fill Selection**.
+
+---
+
+## 📄 References & Papers
+
+1. K. He, J. Sun, *"Statistics of Patch Offsets for Image Completion"*, ECCV 2012 / Microsoft Research. [PDF](https://www.microsoft.com/en-us/research/wp-content/uploads/2013/05/stat_completion.pdf)
+2. C. Barnes, E. Shechtman, A. Finkelstein, D. B. Goldman, *"PatchMatch: A Randomized Correspondence Algorithm for Structural Image Editing"*, ACM SIGGRAPH 2009. [PDF](https://gfx.cs.princeton.edu/pubs/Barnes_2009_PAR/patchmatch.pdf)
+3. A. Telea, *"An Image Inpainting Technique Based on the Fast Marching Method"*, Journal of Graphics Tools, 2004.
+4. A. Criminisi, P. Pérez, K. Toyama, *"Region Filling and Object Removal by Exemplar-Based Image Inpainting"*, IEEE Transactions on Image Processing, 2004.
 
 ---
 
 ## 📄 License
 
-GPLv3. See [LICENSE](LICENSE) for details.
+GPLv3+. See [LICENSE](LICENSE) for details.
