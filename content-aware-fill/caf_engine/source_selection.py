@@ -61,14 +61,17 @@ def compute_source_suitability(
                     known_centers.append((x, y))
 
     if not known_centers:
-        # Fallback: all non-hole pixels
-        for y in range(r, height - r):
+        # Fallback: all non-hole pixels with clamped patch centers
+        for y in range(height):
             row = y * width
-            for x in range(r, width - r):
+            for x in range(width):
                 idx = row + x
-                if mask_bytes[idx] <= 10:
+                is_hole = (mask_bytes[idx] > 10) or (channels == 4 and img_bytes[idx * channels + 3] < 10)
+                if not is_hole:
                     valid_mask[idx] = 1
-                    known_centers.append((x, y))
+                    cx = max(r, min(width - 1 - r, x))
+                    cy = max(r, min(height - 1 - r, y))
+                    known_centers.append((cx, cy))
 
     # 2. Dominant Shift Vector Discovery
     sel_w = mask_analysis.hole_w if mask_analysis else width // 4

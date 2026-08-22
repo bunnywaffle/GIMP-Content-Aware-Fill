@@ -86,6 +86,18 @@ def run_patchmatch_solver(
                 nnf_x[idx] = kx
                 nnf_y[idx] = ky
 
+    # Initialize work canvas with initial exemplar sources
+    for x, y in hole_pixels:
+        idx = y * width + x
+        sx = nnf_x[idx]
+        sy = nnf_y[idx]
+        t_pix = idx * channels
+        s_pix = (sy * width + sx) * channels
+        for c in range(min(3, channels)):
+            work_img[t_pix + c] = src_img[s_pix + c]
+        if channels == 4:
+            work_img[t_pix + 3] = 255
+
     # Precomputed 1D flat byte offsets
     grid_offsets = [
         (-r * width - r) * channels, (-r * width) * channels, (-r * width + r) * channels,
