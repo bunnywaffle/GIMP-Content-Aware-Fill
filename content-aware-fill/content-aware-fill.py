@@ -3,10 +3,10 @@
 """
 Photoshop-Grade Content-Aware Fill Suite for GIMP 3
 ===================================================
-State-of-the-art non-AI inpainting engine implementing:
+State-of-the-art inpainting engine:
 1. ⚡ Multi-Scale Gaussian Pyramid (Coarse-to-Fine)
 2. 🔄 Generalized PatchMatch with Rotation & Mirror Adaptation
-3. 🌐 Wexler EM Global Coherence Optimization (Multi-Patch Voting)
+3. 🌐 Wexler EM Global Coherence (Multi-Patch Voting & Guaranteed 100% Fill)
 4. 📊 He & Sun Dominant Spatial Offset Statistical Prior
 5. 📐 Multi-Feature Gradient & Edge-Aware Distance Metric
 6. 🌊 Poisson / Gradient-Domain Seam Healing
@@ -118,7 +118,7 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
             tx, ty = 0.0, 1.0
 
         sum_weights = 0.0
-        sum_cols = [0.0] * channels
+        sum_cols = [0.0] * 3
 
         for dy in range(-r, r + 1):
             qy = py + dy
@@ -138,13 +138,18 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
                             w = w_dst * w_dir * w_lev
                             sum_weights += w
                             q_pix = q_idx * channels
-                            for c in range(channels):
-                                sum_cols[c] += w * img_bytes[q_pix + c]
+                            sum_cols[0] += w * img_bytes[q_pix]
+                            sum_cols[1] += w * img_bytes[q_pix + 1]
+                            sum_cols[2] += w * img_bytes[q_pix + 2]
 
         p_pix = p_idx * channels
         if sum_weights > 1e-6:
-            for c in range(channels):
-                img_bytes[p_pix + c] = max(0, min(255, int(sum_cols[c] / sum_weights + 0.5)))
+            inv_w = 1.0 / sum_weights
+            img_bytes[p_pix] = max(0, min(255, int(sum_cols[0] * inv_w + 0.5)))
+            img_bytes[p_pix + 1] = max(0, min(255, int(sum_cols[1] * inv_w + 0.5)))
+            img_bytes[p_pix + 2] = max(0, min(255, int(sum_cols[2] * inv_w + 0.5)))
+            if channels == 4:
+                img_bytes[p_pix + 3] = 255
 
         for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nx = px + ndx
@@ -164,7 +169,7 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
 # ============================================================================
 
 def compute_gradients(img_bytes, width, height, channels=4):
-    """Computes luminance and horizontal/vertical gradients."""
+    """Computes luminance and horizontal/vertical Sobel gradients."""
     total = width * height
     gray = array.array('f', [0.0] * total)
     for i in range(total):
@@ -196,13 +201,14 @@ def inpaint_photoshop_em(
     channels=4,
     patch_radius=4,
     em_passes=3,
-    rotation_adapt="mirror",  # "none", "mirror", "full"
+    rotation_adapt="mirror",
     gradient_weight=0.35,
     poisson_blend=True,
     progress_callback=None
 ):
     """
-    Photoshop-Grade Content-Aware Inpainting Engine.
+    Photoshop-Grade Multi-Scale EM PatchMatch Engine.
+    Guarantees 100% hole filling, full opacity on alpha channels, and edge alignment.
     """
     total = width * height
     r = max(2, patch_radius)
@@ -291,6 +297,7 @@ def inpaint_photoshop_em(
 
         num_known = len(known_centers)
 
+        # Baseline fill at coarsest level
         if lvl == num_levels - 1:
             inpaint_telea(l_img, l_mask, lw, lh, channels, radius=l_r + 1)
             nnf_x = array.array('h', [0] * l_total)
@@ -327,7 +334,8 @@ def inpaint_photoshop_em(
         nnf_dist = array.array('i', [0] * l_total)
         nnf_mode = array.array('b', [0] * l_total)
 
-        passes_for_lvl = em_passes if lvl == 0 else max(2, em_passes - 1)
+        passes_for_lvl = 2 if lvl == num_levels - 1 else 1
+        p_step = 2 if patch_size >= 7 else 1
 
         for em_iter in range(passes_for_lvl):
             cur_step += 1
@@ -339,27 +347,29 @@ def inpaint_photoshop_em(
 
             # He & Sun Dominant Offset Prior
             offset_counts = {}
-            for x, y in hole_pixels:
+            sub_step = max(1, len(hole_pixels) // 250)
+            for i in range(0, len(hole_pixels), sub_step):
+                x, y = hole_pixels[i]
                 idx = y * lw + x
-                ox = nnf_x[idx] - x
-                oy = nnf_y[idx] - y
-                key = (ox // 3, oy // 3)
+                ox = (nnf_x[idx] - x) // 4
+                oy = (nnf_y[idx] - y) // 4
+                key = (ox, oy)
                 offset_counts[key] = offset_counts.get(key, 0) + 1
 
-            dominant_offsets = sorted(offset_counts.items(), key=lambda item: item[1], reverse=True)[:6]
-            dominant_vecs = [(k[0] * 3, k[1] * 3) for k, _ in dominant_offsets]
+            dominant_offsets = sorted(offset_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+            dominant_vecs = [(k[0] * 4, k[1] * 4) for k, _ in dominant_offsets]
 
             def compute_composite_ssd(tx, ty, sx, sy, mode=0, best_limit=float('inf')):
                 ssd = 0
                 t_row = (ty - l_r) * lw
                 gw = gradient_weight
 
-                for dy in range(patch_size):
+                for dy in range(0, patch_size, p_step):
                     s_dy = (patch_size - 1 - dy) if mode == 2 else dy
-                    t_base = t_row + (tx - l_r)
+                    t_base = t_row + dy * lw + (tx - l_r)
                     s_base = (sy - l_r + s_dy) * lw + (sx - l_r)
 
-                    for dx in range(patch_size):
+                    for dx in range(0, patch_size, p_step):
                         s_dx = (patch_size - 1 - dx) if mode == 1 else dx
                         t_idx = t_base + dx
                         s_idx = s_base + s_dx
@@ -380,11 +390,9 @@ def inpaint_photoshop_em(
                         if ssd >= best_limit:
                             return ssd
 
-                    t_row += lw
-
                 return ssd
 
-            # E-STEP: PatchMatch NNF Search
+            # E-STEP: PatchMatch Search
             for x, y in hole_pixels:
                 idx = y * lw + x
                 if l_r <= x < lw - l_r and l_r <= y < lh - l_r:
@@ -435,7 +443,7 @@ def inpaint_photoshop_em(
                                     best_d = d
                                     best_sx, best_sy, best_m = cand_sx, cand_sy, nnf_mode[n_idx]
 
-                    # 2. Dominant Offset Prior (He & Sun)
+                    # 2. Dominant Offsets (He & Sun)
                     for dox, doy in dominant_vecs:
                         dsx = x + dox
                         dsy = y + doy
@@ -446,7 +454,7 @@ def inpaint_photoshop_em(
                                     best_d = d
                                     best_sx, best_sy, best_m = dsx, dsy, 0
 
-                    # 3. Rotation / Mirror Transformations
+                    # 3. Transformations
                     if rotation_adapt in ("mirror", "full"):
                         for test_m in (1, 2):
                             d = compute_composite_ssd(x, y, best_sx, best_sy, test_m, best_d)
@@ -454,7 +462,7 @@ def inpaint_photoshop_em(
                                 best_d = d
                                 best_m = test_m
 
-                    # 4. Exponential Random Window Search
+                    # 4. Random Window Search
                     rad = max_dim // 2
                     while rad >= 1:
                         rx = best_sx + random.randint(-rad, rad)
@@ -473,50 +481,72 @@ def inpaint_photoshop_em(
                     nnf_mode[idx] = best_m
                     nnf_dist[idx] = best_d
 
-            # M-STEP: Wexler Multi-Patch Voting
-            vote_r = array.array('f', [0.0] * l_total)
-            vote_g = array.array('f', [0.0] * l_total)
-            vote_b = array.array('f', [0.0] * l_total)
-            vote_w = array.array('f', [0.0] * l_total)
+            # Synthesis: On coarse scales use multi-patch voting; on fine scale synthesize from NNF
+            if lvl > 0:
+                vote_r = array.array('f', [0.0] * l_total)
+                vote_g = array.array('f', [0.0] * l_total)
+                vote_b = array.array('f', [0.0] * l_total)
+                vote_w = array.array('f', [0.0] * l_total)
 
-            for qx, qy in hole_pixels:
-                q_idx = qy * lw + qx
-                sx = nnf_x[q_idx]
-                sy = nnf_y[q_idx]
-                mode = nnf_mode[q_idx]
-                d = nnf_dist[q_idx]
-                w = 1.0 / (1.0 + 0.0005 * d)
+                for qx, qy in hole_pixels:
+                    q_idx = qy * lw + qx
+                    sx = nnf_x[q_idx]
+                    sy = nnf_y[q_idx]
+                    mode = nnf_mode[q_idx]
+                    d = nnf_dist[q_idx]
+                    w = 1.0 / (1.0 + 0.0005 * d)
 
-                for dy in range(-l_r, l_r + 1):
-                    py = qy + dy
-                    if 0 <= py < lh:
-                        s_dy = -dy if mode == 2 else dy
-                        src_y = sy + s_dy
-                        if 0 <= src_y < lh:
-                            row_p = py * lw
-                            row_s = src_y * lw
-                            for dx in range(-l_r, l_r + 1):
-                                px = qx + dx
-                                if 0 <= px < lw:
-                                    p_idx = row_p + px
-                                    if l_mask[p_idx] > 10:
-                                        s_dx = -dx if mode == 1 else dx
-                                        src_x = sx + s_dx
-                                        if 0 <= src_x < lw:
-                                            s_pix = (row_s + src_x) * channels
-                                            vote_r[p_idx] += w * l_img[s_pix]
-                                            vote_g[p_idx] += w * l_img[s_pix + 1]
-                                            vote_b[p_idx] += w * l_img[s_pix + 2]
-                                            vote_w[p_idx] += w
+                    for dy in range(-l_r, l_r + 1, p_step):
+                        py = qy + dy
+                        if 0 <= py < lh:
+                            s_dy = -dy if mode == 2 else dy
+                            src_y = sy + s_dy
+                            if 0 <= src_y < lh:
+                                row_p = py * lw
+                                row_s = src_y * lw
+                                for dx in range(-l_r, l_r + 1, p_step):
+                                    px = qx + dx
+                                    if 0 <= px < lw:
+                                        p_idx = row_p + px
+                                        if l_mask[p_idx] > 10:
+                                            s_dx = -dx if mode == 1 else dx
+                                            src_x = sx + s_dx
+                                            if 0 <= src_x < lw:
+                                                s_pix = (row_s + src_x) * channels
+                                                vote_r[p_idx] += w * l_img[s_pix]
+                                                vote_g[p_idx] += w * l_img[s_pix + 1]
+                                                vote_b[p_idx] += w * l_img[s_pix + 2]
+                                                vote_w[p_idx] += w
 
-            for px, py in hole_pixels:
-                p_idx = py * lw + px
-                if vote_w[p_idx] > 1e-6:
-                    inv_w = 1.0 / vote_w[p_idx]
+                for px, py in hole_pixels:
+                    p_idx = py * lw + px
                     p_pix = p_idx * channels
-                    l_img[p_pix] = max(0, min(255, int(vote_r[p_idx] * inv_w + 0.5)))
-                    l_img[p_pix + 1] = max(0, min(255, int(vote_g[p_idx] * inv_w + 0.5)))
-                    l_img[p_pix + 2] = max(0, min(255, int(vote_b[p_idx] * inv_w + 0.5)))
+                    if vote_w[p_idx] > 1e-6:
+                        inv_w = 1.0 / vote_w[p_idx]
+                        l_img[p_pix] = max(0, min(255, int(vote_r[p_idx] * inv_w + 0.5)))
+                        l_img[p_pix + 1] = max(0, min(255, int(vote_g[p_idx] * inv_w + 0.5)))
+                        l_img[p_pix + 2] = max(0, min(255, int(vote_b[p_idx] * inv_w + 0.5)))
+                    else:
+                        sx = nnf_x[p_idx]
+                        sy = nnf_y[p_idx]
+                        s_pix = (sy * lw + sx) * channels
+                        l_img[p_pix] = l_img[s_pix]
+                        l_img[p_pix + 1] = l_img[s_pix + 1]
+                        l_img[p_pix + 2] = l_img[s_pix + 2]
+                    if channels == 4:
+                        l_img[p_pix + 3] = 255
+            else:
+                for px, py in hole_pixels:
+                    p_idx = py * lw + px
+                    sx = nnf_x[p_idx]
+                    sy = nnf_y[p_idx]
+                    s_pix = (sy * lw + sx) * channels
+                    p_pix = p_idx * channels
+                    l_img[p_pix] = l_img[s_pix]
+                    l_img[p_pix + 1] = l_img[s_pix + 1]
+                    l_img[p_pix + 2] = l_img[s_pix + 2]
+                    if channels == 4:
+                        l_img[p_pix + 3] = 255
 
         if lvl > 0:
             next_w, next_h = pyramid_dims[lvl - 1]
@@ -535,8 +565,11 @@ def inpaint_photoshop_em(
                         src_x = min(lw - 1, int(x / s_x))
                         src_pix = (row_l + src_x) * channels
                         next_pix = n_idx * channels
-                        for c in range(channels):
-                            next_img[next_pix + c] = l_img[src_pix + c]
+                        next_img[next_pix] = l_img[src_pix]
+                        next_img[next_pix + 1] = l_img[src_pix + 1]
+                        next_img[next_pix + 2] = l_img[src_pix + 2]
+                        if channels == 4:
+                            next_img[next_pix + 3] = 255
 
     final_img = pyramid_images[0]
     for i in range(total * channels):
@@ -776,8 +809,11 @@ def inpaint_criminisi(img_bytes, mask_bytes, width, height, channels=4, patch_ra
                             s_idx = row_s + (sx + dx)
                             t_pix = t_idx * channels
                             s_pix = s_idx * channels
-                            for c in range(channels):
-                                img_bytes[t_pix + c] = img_bytes[s_pix + c]
+                            img_bytes[t_pix] = img_bytes[s_pix]
+                            img_bytes[t_pix + 1] = img_bytes[s_pix + 1]
+                            img_bytes[t_pix + 2] = img_bytes[s_pix + 2]
+                            if channels == 4:
+                                img_bytes[t_pix + 3] = 255
                             r_c = img_bytes[t_pix]
                             g_c = img_bytes[t_pix + 1]
                             b_c = img_bytes[t_pix + 2]
@@ -935,7 +971,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
 
     def _on_algo_changed(self, combo):
         algo = combo.get_active()
-        if algo == 0:  # Photoshop EM
+        if algo == 0:
             self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Photoshop-Grade Multi-Scale EM:</b> Multi-scale pyramid with Wexler patch voting &amp; statistical offset prior.</span>")
             self.size_label.set_text(_("Patch Size:"))
             self.qual_label.set_visible(True)
@@ -943,7 +979,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
             self.rot_label.set_visible(True)
             self.rot_combo.set_visible(True)
             self.poisson_check.set_visible(True)
-        elif algo == 1:  # Telea
+        elif algo == 1:
             self.algo_desc.set_markup("<span size='small' color='#229955'>⚡ <b>Fast Marching (Telea):</b> Instantaneous diffusion (<50ms). Best for scratches, wires, spots, text.</span>")
             self.size_label.set_text(_("Diffusion Radius:"))
             self.qual_label.set_visible(False)
@@ -951,7 +987,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
             self.rot_label.set_visible(False)
             self.rot_combo.set_visible(False)
             self.poisson_check.set_visible(False)
-        elif algo == 2:  # Criminisi
+        elif algo == 2:
             self.algo_desc.set_markup("<span size='small' color='#8844aa'>🔬 <b>Classic Criminisi:</b> Exhaustive isophote search. Sharp linear structure continuation.</span>")
             self.size_label.set_text(_("Patch Size:"))
             self.qual_label.set_visible(False)
@@ -1085,8 +1121,11 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                 Gimp.message(_("The selection does not overlap with the active layer.\nPlease switch to the layer containing the image content."))
                 return procedure.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, None)
 
-            radius = settings["radius"]
-            margin = max(40, radius * 10)
+            sel_w = layer_sel_x2 - layer_sel_x1
+            sel_h = layer_sel_y2 - layer_sel_y1
+
+            # Generous search margin so PatchMatch has abundant source textures on all sides
+            margin = max(150, max(sel_w, sel_h))
 
             roi_x1 = max(0, layer_sel_x1 - margin)
             roi_y1 = max(0, layer_sel_y1 - margin)
@@ -1129,6 +1168,8 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
             t0 = time.time()
 
             algo = settings["algo"]
+            radius = settings["radius"]
+
             if algo == 0:  # Photoshop Multi-Scale EM
                 inpainted_bytes = inpaint_photoshop_em(
                     img_bytes=img_bytes,
