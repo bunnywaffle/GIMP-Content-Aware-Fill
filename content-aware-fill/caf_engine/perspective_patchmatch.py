@@ -75,11 +75,12 @@ def run_perspective_patchmatch(
     if not all_known:
         all_known = [(width // 2, height // 2)]
 
-    # Precomputed 1D flat byte offsets
+    # Precomputed 25-point dense grid offsets (5x5 sampling)
+    step = max(1, r // 2)
     grid_offsets = [
-        (-r * width - r) * channels, (-r * width) * channels, (-r * width + r) * channels,
-        (-r) * channels, 0, (r) * channels,
-        (r * width - r) * channels, (r * width) * channels, (r * width + r) * channels,
+        (dy * width + dx) * channels
+        for dy in (-r, -step, 0, step, r)
+        for dx in (-r, -step, 0, step, r)
     ]
 
     def compute_patch_dist(t_byte, s_byte, best_lim=float('inf')):
