@@ -115,7 +115,7 @@ def inpaint_photoshop_coherence(
     if progress_callback:
         progress_callback(0.08, _tr("Discovering dominant spatial shift vectors (He & Sun)..."))
 
-    # 1. Discover Dominant Spatial Shifts (He & Sun ECCV 2012)
+    # 1. Multi-Threaded Dominant Spatial Shift Discovery (He & Sun ECCV 2012)
     step_band = max(1, len(band_pixels) // 40)
     eval_band = band_pixels[::step_band]
     num_eval = len(eval_band)
@@ -138,15 +138,12 @@ def inpaint_photoshop_coherence(
         dy_cands = list(range(-min(max_y - 1, sel_h + 80), -max(4, sel_h // 4), 8)) + \
                     list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h + 80), 8)) + [0]
 
-    best_global_score = float('inf')
-    best_global_shift = (0, 0)
-    ranked_shifts = []
+    all_candidate_shifts = [(dx, dy) for dy in dy_cands for dx in dx_cands if (dx != 0 or dy != 0)]
+    cpu_cores = os.cpu_count() or 4
 
-    for dy in dy_cands:
-        for dx in dx_cands:
-            if dx == 0 and dy == 0:
-                continue
-
+    def evaluate_shift_chunk(shifts_chunk):
+        results = []
+        for dx, dy in shifts_chunk:
             tested = 0
             ssd = 0
             for bx, by in eval_band:
@@ -162,18 +159,22 @@ def inpaint_photoshop_coherence(
                         dg = img_bytes[b_pix + 1] - img_bytes[s_pix + 1]
                         db = img_bytes[b_pix + 2] - img_bytes[s_pix + 2]
                         ssd += dr * dr + dg * dg + db * db
-                        if ssd >= best_global_score * tested:
-                            break
-
             if tested >= max(4, num_eval // 4):
                 avg_err = ssd / float(tested)
-                ranked_shifts.append((avg_err, dx, dy))
-                if avg_err < best_global_score:
-                    best_global_score = avg_err
-                    best_global_shift = (dx, dy)
+                results.append((avg_err, (dx, dy)))
+        return results
+
+    chunk_size = max(1, len(all_candidate_shifts) // cpu_cores)
+    chunks = [all_candidate_shifts[i:i + chunk_size] for i in range(0, len(all_candidate_shifts), chunk_size)]
+
+    ranked_shifts = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=cpu_cores) as executor:
+        futures = [executor.submit(evaluate_shift_chunk, c) for c in chunks]
+        for f in concurrent.futures.as_completed(futures):
+            ranked_shifts.extend(f.result())
 
     ranked_shifts.sort(key=lambda item: item[0])
-    valid_shifts = [shift for _, shift in [(err, (dx, dy)) for err, dx, dy in ranked_shifts[:6]]]
+    valid_shifts = [shift for _, shift in ranked_shifts[:6]]
     if not valid_shifts:
         valid_shifts = [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h)]
 
