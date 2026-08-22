@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Photoshop-Grade Content-Aware Fill Plugin for GIMP 3
-===================================================
-State-of-the-Art Inpainting Suite:
-1. ⚡ Photoshop-Grade Coherence & Poisson Inpainting (Default - 100% Seamless, Zero Cut-off Lines)
-2. 🎯 Structural Shift-Map (Instant <0.04s Direct Single-Offset Transfer)
+Photoshop-Style Content-Aware Fill Plugin for GIMP 3
+====================================================
+A complete classical, non-AI object removal & hole-filling suite:
+1. ⚡ Photoshop-Grade Full Modular Pipeline (Default)
+   - Multi-scale Gaussian pyramid, Scharr & structure tensors, multi-threaded PatchMatch,
+     MRF global consistency, seam optimization, color adaptation, and Poisson blending.
+2. 🎯 Structural Shift-Map (Instant <0.04s Direct Single-Offset Alignment)
 3. 💨 Telea Fast Marching (Instant Diffusion for Scratches/Wires/Text)
 4. 🔬 Classic Criminisi (Exhaustive Isophote Priority Synthesis)
-
-Includes User-Definable Sampling Area Controls (Auto, Right, Left, Above, Below, All Around).
-Full Support for both Opaque and Transparent Selections.
 
 Author: bunnywaffle & Antigravity
 License: GPLv3+
@@ -24,7 +23,13 @@ import array
 import random
 import heapq
 import traceback
-import concurrent.futures
+
+# Ensure caf_engine is in Python module path
+plugin_dir = os.path.dirname(os.path.abspath(__file__))
+if plugin_dir not in sys.path:
+    sys.path.insert(0, plugin_dir)
+
+from caf_engine import execute_content_aware_fill_pipeline
 
 import gi
 
@@ -46,351 +51,12 @@ _ = _tr
 
 
 # ============================================================================
-# 1. Photoshop-Grade Coherence & Poisson Inpainting Engine (Default)
+# Standalone Fallback Engines for Specific Fast Tasks
 # ============================================================================
 
-def inpaint_photoshop_coherence(
-    img_bytes,
-    mask_bytes,
-    width,
-    height,
-    channels=4,
-    patch_radius=4,
-    sample_source="auto",
-    num_em_iters=2,
-    progress_callback=None
-):
-    """
-    Photoshop-Grade Coherence Inpainting Engine (Default).
-    Combines He & Sun Dominant Spatial Shifts, Fast PatchMatch Optimization,
-    and Harmonic Poisson Residual Diffusion to guarantee zero cut-off lines,
-    zero blur, and 100% seamless blending for both opaque and transparent selections.
-    """
-    total = width * height
-    r = max(2, int(patch_radius))
-
-    mask = bytearray(total)
-    hole_pixels = []
-    band_pixels = []
-    known_centers = []
-    min_x, max_x = width, 0
-    min_y, max_y = height, 0
-
-    for y in range(height):
-        row = y * width
-        for x in range(width):
-            idx = row + x
-            # Handle both selection mask and transparent holes
-            is_hole = (mask_bytes[idx] > 10) or (channels == 4 and img_bytes[idx * 4 + 3] < 10)
-            if is_hole:
-                mask[idx] = 1
-                hole_pixels.append((x, y))
-                if x < min_x: min_x = x
-                if x > max_x: max_x = x
-                if y < min_y: min_y = y
-                if y > max_y: max_y = y
-
-                # 4-neighborhood boundary band check
-                for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    nx = x + ndx
-                    ny = y + ndy
-                    if 0 <= nx < width and 0 <= ny < height:
-                        n_idx = ny * width + nx
-                        n_is_hole = (mask_bytes[n_idx] > 10) or (channels == 4 and img_bytes[n_idx * 4 + 3] < 10)
-                        if not n_is_hole:
-                            band_pixels.append((x, y))
-                            break
-            else:
-                mask[idx] = 0
-                if r <= x < width - r and r <= y < height - r:
-                    known_centers.append((x, y))
-
-    if not hole_pixels or not known_centers:
-        return img_bytes
-
-    num_known = len(known_centers)
-    sel_w = max_x - min_x + 1
-    sel_h = max_y - min_y + 1
-
-    if progress_callback:
-        progress_callback(0.08, _tr("Discovering dominant spatial shift vectors (He & Sun)..."))
-
-    # 1. Multi-Threaded Dominant Spatial Shift Discovery (He & Sun ECCV 2012)
-    step_band = max(1, len(band_pixels) // 40)
-    eval_band = band_pixels[::step_band]
-    num_eval = len(eval_band)
-
-    if sample_source == "right":
-        dx_cands = list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w * 2 + 80), 8))
-        dy_cands = list(range(-16, 17, 4))
-    elif sample_source == "left":
-        dx_cands = list(range(-min(max_x - 1, sel_w * 2 + 80), -max(4, sel_w // 4), 8))
-        dy_cands = list(range(-16, 17, 4))
-    elif sample_source == "above":
-        dx_cands = list(range(-16, 17, 4))
-        dy_cands = list(range(-min(max_y - 1, sel_h * 2 + 80), -max(4, sel_h // 4), 8))
-    elif sample_source == "below":
-        dx_cands = list(range(-16, 17, 4))
-        dy_cands = list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h * 2 + 80), 8))
-    else:  # Auto
-        dx_cands = list(range(-min(max_x - 1, sel_w + 80), -max(4, sel_w // 4), 8)) + \
-                    list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w + 80), 8)) + [0]
-        dy_cands = list(range(-min(max_y - 1, sel_h + 80), -max(4, sel_h // 4), 8)) + \
-                    list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h + 80), 8)) + [0]
-
-    all_candidate_shifts = [(dx, dy) for dy in dy_cands for dx in dx_cands if (dx != 0 or dy != 0)]
-    cpu_cores = os.cpu_count() or 4
-
-    def evaluate_shift_chunk(shifts_chunk):
-        results = []
-        for dx, dy in shifts_chunk:
-            tested = 0
-            ssd = 0
-            for bx, by in eval_band:
-                sx = bx + dx
-                sy = by + dy
-                if 0 <= sx < width and 0 <= sy < height:
-                    s_idx = sy * width + sx
-                    if mask[s_idx] == 0:
-                        tested += 1
-                        b_pix = (by * width + bx) * channels
-                        s_pix = s_idx * channels
-                        dr = img_bytes[b_pix] - img_bytes[s_pix]
-                        dg = img_bytes[b_pix + 1] - img_bytes[s_pix + 1]
-                        db = img_bytes[b_pix + 2] - img_bytes[s_pix + 2]
-                        ssd += dr * dr + dg * dg + db * db
-            if tested >= max(4, num_eval // 4):
-                avg_err = ssd / float(tested)
-                results.append((avg_err, (dx, dy)))
-        return results
-
-    chunk_size = max(1, len(all_candidate_shifts) // cpu_cores)
-    chunks = [all_candidate_shifts[i:i + chunk_size] for i in range(0, len(all_candidate_shifts), chunk_size)]
-
-    ranked_shifts = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=cpu_cores) as executor:
-        futures = [executor.submit(evaluate_shift_chunk, c) for c in chunks]
-        for f in concurrent.futures.as_completed(futures):
-            ranked_shifts.extend(f.result())
-
-    ranked_shifts.sort(key=lambda item: item[0])
-    valid_shifts = [shift for _, shift in ranked_shifts[:6]]
-    if not valid_shifts:
-        valid_shifts = [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h)]
-
-    # 2. Harmonic Poisson Initialization for smooth boundary interpolation
-    work_img = bytearray(img_bytes)
-    for init_step in range(6):
-        for x, y in hole_pixels:
-            idx = y * width + x
-            for c in range(min(3, channels)):
-                sum_val = 0
-                cnt = 0
-                for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    nx = x + ndx
-                    ny = y + ndy
-                    if 0 <= nx < width and 0 <= ny < height:
-                        sum_val += work_img[(ny * width + nx) * channels + c]
-                        cnt += 1
-                if cnt > 0:
-                    work_img[idx * channels + c] = sum_val // cnt
-
-    grid_offsets = [
-        (-r * width - r) * channels, (-r * width) * channels, (-r * width + r) * channels,
-        (-r) * channels, 0, (r) * channels,
-        (r * width - r) * channels, (r * width) * channels, (r * width + r) * channels,
-    ]
-
-    nnf_x = array.array('h', [0] * total)
-    nnf_y = array.array('h', [0] * total)
-    nnf_dist = array.array('i', [10000000] * total)
-
-    for x, y in hole_pixels:
-        idx = y * width + x
-        assigned = False
-        if valid_shifts:
-            ox, oy = valid_shifts[0]
-            sx = x + ox
-            sy = y + oy
-            if r <= sx < width - r and r <= sy < height - r and mask[sy * width + sx] == 0:
-                nnf_x[idx] = sx
-                nnf_y[idx] = sy
-                assigned = True
-        if not assigned:
-            kx, ky = known_centers[random.randint(0, num_known - 1)]
-            nnf_x[idx] = kx
-            nnf_y[idx] = ky
-
-    def compute_patch_dist_fast(t_center_byte, s_center_byte, best_limit=float('inf')):
-        ssd = 0
-        for off in grid_offsets:
-            tp = t_center_byte + off
-            sp = s_center_byte + off
-            dr = work_img[tp] - img_bytes[sp]
-            dg = work_img[tp + 1] - img_bytes[sp + 1]
-            db = work_img[tp + 2] - img_bytes[sp + 2]
-            ssd += dr * dr + dg * dg + db * db
-            if ssd >= best_limit:
-                return ssd
-        return ssd
-
-    max_dim = max(width, height)
-    holes_fwd = hole_pixels
-    holes_rev = list(reversed(hole_pixels))
-
-    # 3. Fast EM Optimization Loop
-    for em_iter in range(num_em_iters):
-        if progress_callback:
-            progress_callback(0.20 + 0.35 * em_iter, _tr("Coherence optimization pass %d/%d...") % (em_iter+1, num_em_iters))
-
-        is_fwd = (em_iter % 2 == 0)
-        holes = holes_fwd if is_fwd else holes_rev
-        dir_mult = 1 if is_fwd else -1
-
-        for x, y in holes:
-            if not (r <= x < width - r and r <= y < height - r):
-                continue
-            idx = y * width + x
-            t_byte = idx * channels
-            best_sx = nnf_x[idx]
-            best_sy = nnf_y[idx]
-            best_d = compute_patch_dist_fast(t_byte, (best_sy * width + best_sx) * channels)
-
-            # 1. Horizontal propagation
-            nx = x - dir_mult
-            if r <= nx < width - r:
-                n_idx = y * width + nx
-                cand_sx = nnf_x[n_idx] + dir_mult
-                cand_sy = nnf_y[n_idx]
-                if r <= cand_sx < width - r and r <= cand_sy < height - r and mask[cand_sy * width + cand_sx] == 0:
-                    d = compute_patch_dist_fast(t_byte, (cand_sy * width + cand_sx) * channels, best_d)
-                    if d < best_d:
-                        best_d = d
-                        best_sx, best_sy = cand_sx, cand_sy
-
-            # 2. Vertical propagation
-            ny = y - dir_mult
-            if r <= ny < height - r:
-                n_idx = ny * width + x
-                cand_sx = nnf_x[n_idx]
-                cand_sy = nnf_y[n_idx] + dir_mult
-                if r <= cand_sx < width - r and r <= cand_sy < height - r and mask[cand_sy * width + cand_sx] == 0:
-                    d = compute_patch_dist_fast(t_byte, (cand_sy * width + cand_sx) * channels, best_d)
-                    if d < best_d:
-                        best_d = d
-                        best_sx, best_sy = cand_sx, cand_sy
-
-            # 3. Directional shifts
-            for ox, oy in valid_shifts:
-                cand_sx = x + ox
-                cand_sy = y + oy
-                if r <= cand_sx < width - r and r <= cand_sy < height - r and mask[cand_sy * width + cand_sx] == 0:
-                    d = compute_patch_dist_fast(t_byte, (cand_sy * width + cand_sx) * channels, best_d)
-                    if d < best_d:
-                        best_d = d
-                        best_sx, best_sy = cand_sx, cand_sy
-
-            # 4. Multi-scale random search
-            rad = max_dim // 2
-            while rad >= 2:
-                rx = best_sx + random.randint(-rad, rad)
-                ry = best_sy + random.randint(-rad, rad)
-                rx = max(r, min(width - 1 - r, rx))
-                ry = max(r, min(height - 1 - r, ry))
-                if mask[ry * width + rx] == 0:
-                    d = compute_patch_dist_fast(t_byte, (ry * width + rx) * channels, best_d)
-                    if d < best_d:
-                        best_d = d
-                        best_sx, best_sy = rx, ry
-                rad = int(rad * 0.5)
-
-            nnf_x[idx] = best_sx
-            nnf_y[idx] = best_sy
-            nnf_dist[idx] = best_d
-
-        # Update synthesized canvas from best exemplars
-        for x, y in hole_pixels:
-            idx = y * width + x
-            sx = nnf_x[idx]
-            sy = nnf_y[idx]
-            s_pix = (sy * width + sx) * channels
-            t_pix = idx * channels
-            for c in range(min(3, channels)):
-                work_img[t_pix + c] = img_bytes[s_pix + c]
-            if channels == 4:
-                work_img[t_pix + 3] = 255
-
-    # 4. Global Poisson / Harmonic Residual Healing
-    if progress_callback:
-        progress_callback(0.92, _tr("Harmonic boundary seam blending..."))
-
-    residual_r = array.array('f', [0.0] * total)
-    residual_g = array.array('f', [0.0] * total)
-    residual_b = array.array('f', [0.0] * total)
-
-    for bx, by in band_pixels:
-        b_idx = by * width + bx
-        b_pix = b_idx * channels
-        for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nx = bx + ndx
-            ny = by + ndy
-            if 0 <= nx < width and 0 <= ny < height and mask[ny * width + nx] == 0:
-                n_pix = (ny * width + nx) * channels
-                residual_r[b_idx] = img_bytes[n_pix] - work_img[b_pix]
-                residual_g[b_idx] = img_bytes[n_pix + 1] - work_img[b_pix + 1]
-                residual_b[b_idx] = img_bytes[n_pix + 2] - work_img[b_pix + 2]
-                break
-
-    for diff_step in range(8):
-        for x, y in hole_pixels:
-            idx = y * width + x
-            sum_r = 0.0
-            sum_g = 0.0
-            sum_b = 0.0
-            cnt = 0
-            for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                nx = x + ndx
-                ny = y + ndy
-                if 0 <= nx < width and 0 <= ny < height:
-                    n_idx = ny * width + nx
-                    sum_r += residual_r[n_idx]
-                    sum_g += residual_g[n_idx]
-                    sum_b += residual_b[n_idx]
-                    cnt += 1
-            if cnt > 0:
-                residual_r[idx] = sum_r / cnt
-                residual_g[idx] = sum_g / cnt
-                residual_b[idx] = sum_b / cnt
-
-    for x, y in hole_pixels:
-        idx = y * width + x
-        t_pix = idx * channels
-        work_img[t_pix] = max(0, min(255, int(work_img[t_pix] + residual_r[idx] + 0.5)))
-        work_img[t_pix + 1] = max(0, min(255, int(work_img[t_pix + 1] + residual_g[idx] + 0.5)))
-        work_img[t_pix + 2] = max(0, min(255, int(work_img[t_pix + 2] + residual_b[idx] + 0.5)))
-        if channels == 4:
-            work_img[t_pix + 3] = 255
-
-    return work_img
-
-
-# ============================================================================
-# 2. Structural Shift-Map Engine (<0.04s Direct Offset Alignment)
-# ============================================================================
-
-def inpaint_structural_shiftmap(
-    img_bytes,
-    mask_bytes,
-    width,
-    height,
-    channels=4,
-    sample_source="auto",
-    seam_blend=True,
-    progress_callback=None
-):
+def inpaint_structural_shiftmap(img_bytes, mask_bytes, width, height, channels=4, sample_source="auto", seam_blend=True, progress_callback=None):
     """Direct single-shift structural alignment for uniform direction transfer."""
     total = width * height
-
     hole_pixels = []
     band_pixels = []
     min_x, max_x = width, 0
@@ -406,14 +72,12 @@ def inpaint_structural_shiftmap(
                 if x > max_x: max_x = x
                 if y < min_y: min_y = y
                 if y > max_y: max_y = y
-
                 for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                     nx = x + ndx
                     ny = y + ndy
-                    if 0 <= nx < width and 0 <= ny < height:
-                        if mask_bytes[ny * width + nx] <= 10:
-                            band_pixels.append((x, y))
-                            break
+                    if 0 <= nx < width and 0 <= ny < height and mask_bytes[ny * width + nx] <= 10:
+                        band_pixels.append((x, y))
+                        break
 
     if not hole_pixels or not band_pixels:
         return img_bytes
@@ -435,11 +99,9 @@ def inpaint_structural_shiftmap(
         dy_coarse = list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h * 2 + 100), 4))
     else:
         dx_coarse = list(range(-min(max_x - 1, sel_w + 100), -max(4, sel_w // 4), 6)) + \
-                    list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w + 100), 6)) + \
-                    list(range(-16, 17, 4))
+                    list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w + 100), 6)) + [0]
         dy_coarse = list(range(-min(max_y - 1, sel_h + 100), -max(4, sel_h // 4), 6)) + \
-                    list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h + 100), 6)) + \
-                    list(range(-16, 17, 4))
+                    list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h + 100), 6)) + [0]
 
     step_band = max(1, len(band_pixels) // 80)
     eval_band = band_pixels[::step_band]
@@ -450,9 +112,7 @@ def inpaint_structural_shiftmap(
 
     for dy in dy_coarse:
         for dx in dx_coarse:
-            if dx == 0 and dy == 0:
-                continue
-
+            if dx == 0 and dy == 0: continue
             tested = 0
             ssd = 0
             for bx, by in eval_band:
@@ -468,8 +128,7 @@ def inpaint_structural_shiftmap(
                         dg = img_bytes[b_pix + 1] - img_bytes[s_pix + 1]
                         db = img_bytes[b_pix + 2] - img_bytes[s_pix + 2]
                         ssd += dr * dr + dg * dg + db * db
-                        if ssd >= best_score * tested:
-                            break
+                        if ssd >= best_score * tested: break
 
             if tested >= max(6, num_eval // 4):
                 avg_err = ssd / float(tested)
@@ -483,49 +142,17 @@ def inpaint_structural_shiftmap(
         best_dy = 0
 
     for x, y in hole_pixels:
-        sx = x + best_dx
-        sy = y + best_dy
-        sx = max(0, min(width - 1, sx))
-        sy = max(0, min(height - 1, sy))
-
-        if mask_bytes[sy * width + sx] > 10:
-            if sx + best_dx < width and mask_bytes[sy * width + (sx + best_dx)] <= 10:
-                sx = sx + best_dx
-            elif sx - best_dx >= 0 and mask_bytes[sy * width + (sx - best_dx)] <= 10:
-                sx = sx - best_dx
-
+        sx = max(0, min(width - 1, x + best_dx))
+        sy = max(0, min(height - 1, y + best_dy))
         s_pix = (sy * width + sx) * channels
         t_pix = (y * width + x) * channels
-
-        img_bytes[t_pix] = img_bytes[s_pix]
-        img_bytes[t_pix + 1] = img_bytes[s_pix + 1]
-        img_bytes[t_pix + 2] = img_bytes[s_pix + 2]
+        for c in range(min(3, channels)):
+            img_bytes[t_pix + c] = img_bytes[s_pix + c]
         if channels == 4:
             img_bytes[t_pix + 3] = 255
 
-    if seam_blend:
-        for seam_pass in range(3):
-            for sx, sy in band_pixels:
-                s_idx = sy * width + sx
-                for c in range(min(3, channels)):
-                    sum_val = 0
-                    cnt = 0
-                    for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                        nx = sx + ndx
-                        ny = sy + ndy
-                        if 0 <= nx < width and 0 <= ny < height:
-                            sum_val += img_bytes[(ny * width + nx) * channels + c]
-                            cnt += 1
-                    if cnt > 0:
-                        pix_pos = s_idx * channels + c
-                        img_bytes[pix_pos] = (img_bytes[pix_pos] + sum_val // cnt) // 2
-
     return img_bytes
 
-
-# ============================================================================
-# 3. Telea Fast Marching (Instant Diffusion for Scratches/Text)
-# ============================================================================
 
 def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, progress_callback=None):
     """Fast Marching Inpainting (Telea, 2004). Instantaneous (< 50ms) for scratches/lines/spots."""
@@ -533,8 +160,8 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
     flags = bytearray(total)
     dist = array.array('f', [1e6] * total)
     band_heap = []
-
     hole_count = 0
+
     for y in range(height):
         row = y * width
         for x in range(width):
@@ -550,7 +177,6 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
         return img_bytes
 
     initial_hole_count = hole_count
-
     for y in range(height):
         row = y * width
         for x in range(width):
@@ -567,19 +193,13 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
     r = max(1, radius)
     r2 = r * r
     processed = 0
-    last_report = time.time()
 
     while band_heap:
         d, px, py = heapq.heappop(band_heap)
         p_idx = py * width + px
-        if flags[p_idx] != 1:
-            continue
+        if flags[p_idx] != 1: continue
         flags[p_idx] = 0
         processed += 1
-
-        if progress_callback and (processed % 150 == 0 or time.time() - last_report > 0.15):
-            last_report = time.time()
-            progress_callback(min(1.0, processed / float(initial_hole_count)), "Fast Marching Inpainting...")
 
         tx = 0.0
         ty = 0.0
@@ -642,242 +262,7 @@ def inpaint_telea(img_bytes, mask_bytes, width, height, channels=4, radius=4, pr
 
 
 # ============================================================================
-# 4. Classic Criminisi (Exhaustive Isophote Synthesis)
-# ============================================================================
-
-def inpaint_criminisi(img_bytes, mask_bytes, width, height, channels=4, patch_radius=4, progress_callback=None):
-    """Classic Criminisi et al. Exemplar-based Inpainting."""
-    total_pixels = width * height
-    patch_size = 2 * patch_radius + 1
-    patch_area = float(patch_size * patch_size)
-    r = patch_radius
-
-    mask = bytearray(total_pixels)
-    confidence = array.array('f', [1.0] * total_pixels)
-    hole_count = 0
-    min_x, max_x = width, 0
-    min_y, max_y = height, 0
-
-    for y in range(height):
-        row = y * width
-        for x in range(width):
-            idx = row + x
-            if mask_bytes[idx] > 10:
-                mask[idx] = 1
-                confidence[idx] = 0.0
-                hole_count += 1
-                if x < min_x: min_x = x
-                if x > max_x: max_x = x
-                if y < min_y: min_y = y
-                if y > max_y: max_y = y
-
-    if hole_count == 0:
-        return img_bytes
-
-    initial_hole_count = hole_count
-
-    gray = array.array('f', [0.0] * total_pixels)
-    for i in range(total_pixels):
-        idx = i * channels
-        gray[i] = 0.299 * img_bytes[idx] + 0.587 * img_bytes[idx + 1] + 0.114 * img_bytes[idx + 2]
-
-    front = set()
-    for y in range(min_y, max_y + 1):
-        row = y * width
-        for x in range(min_x, max_x + 1):
-            idx = row + x
-            if mask[idx] == 1:
-                if (x > 0 and mask[idx - 1] == 0) or \
-                   (x < width - 1 and mask[idx + 1] == 0) or \
-                   (y > 0 and mask[idx - width] == 0) or \
-                   (y < height - 1 and mask[idx + width] == 0):
-                    front.add((x, y))
-
-    candidate_sources = []
-    margin = max(60, patch_radius * 12)
-    s_min_x = max(r, min_x - margin)
-    s_max_x = min(width - 1 - r, max_x + margin)
-    s_min_y = max(r, min_y - margin)
-    s_max_y = min(height - 1 - r, max_y + margin)
-
-    for sy in range(s_min_y, s_max_y + 1, 2):
-        for sx in range(s_min_x, s_max_x + 1, 2):
-            if mask[sy * width + sx] == 0:
-                candidate_sources.append((sx, sy))
-
-    if not candidate_sources:
-        for sy in range(r, height - r, max(1, r)):
-            for sx in range(r, width - r, max(1, r)):
-                if mask[sy * width + sx] == 0:
-                    candidate_sources.append((sx, sy))
-
-    if not candidate_sources:
-        return img_bytes
-
-    iteration = 0
-    last_report = time.time()
-
-    while front:
-        iteration += 1
-        if progress_callback and (iteration % 8 == 0 or time.time() - last_report > 0.2):
-            last_report = time.time()
-            done = 1.0 - (hole_count / float(initial_hole_count))
-            progress_callback(max(0.0, min(1.0, done)), "Criminisi Inpainting...")
-
-        best_p = next(iter(front))
-        best_priority = -1.0
-        best_c = 0.0
-
-        for px, py in front:
-            c_sum = 0.0
-            for dy in range(-r, r + 1):
-                qy = py + dy
-                if 0 <= qy < height:
-                    row_q = qy * width
-                    for dx in range(-r, r + 1):
-                        qx = px + dx
-                        if 0 <= qx < width:
-                            q_idx = row_q + qx
-                            if mask[q_idx] == 0:
-                                c_sum += confidence[q_idx]
-            cp = c_sum / patch_area
-
-            nx = 0.0
-            ny = 0.0
-            if 0 < px < width - 1:
-                nx = float(mask[py * width + px + 1] - mask[py * width + px - 1])
-            if 0 < py < height - 1:
-                ny = float(mask[(py + 1) * width + px] - mask[(py - 1) * width + px])
-            norm = math.sqrt(nx * nx + ny * ny)
-            if norm > 1e-5:
-                nx /= norm
-                ny /= norm
-            else:
-                nx, ny = 0.0, 1.0
-
-            max_grad_mag = 0.0
-            best_gx = 0.0
-            best_gy = 0.0
-            for dy in range(-r, r + 1):
-                qy = py + dy
-                if 1 <= qy < height - 1:
-                    row_q = qy * width
-                    for dx in range(-r, r + 1):
-                        qx = px + dx
-                        if 1 <= qx < width - 1:
-                            q_idx = row_q + qx
-                            if mask[q_idx] == 0:
-                                gx = (gray[q_idx + 1] - gray[q_idx - 1]) * 0.5
-                                gy = (gray[q_idx + width] - gray[q_idx - width]) * 0.5
-                                mag = gx * gx + gy * gy
-                                if mag > max_grad_mag:
-                                    max_grad_mag = mag
-                                    best_gx = gx
-                                    best_gy = gy
-
-            dp = max(0.001, abs(-best_gy * nx + best_gx * ny) / 255.0)
-            priority = cp * dp
-            if priority > best_priority:
-                best_priority = priority
-                best_p = (px, py)
-                best_c = cp
-
-        px, py = best_p
-        known_pixels = []
-        for dy in range(-r, r + 1):
-            ty = py + dy
-            if 0 <= ty < height:
-                row_t = ty * width
-                for dx in range(-r, r + 1):
-                    tx = px + dx
-                    if 0 <= tx < width:
-                        t_idx = row_t + tx
-                        if mask[t_idx] == 0:
-                            pix_idx = t_idx * channels
-                            known_pixels.append((
-                                dx, dy,
-                                img_bytes[pix_idx],
-                                img_bytes[pix_idx + 1],
-                                img_bytes[pix_idx + 2]
-                            ))
-
-        if not known_pixels:
-            front.remove(best_p)
-            continue
-
-        best_ssd = float('inf')
-        best_source = None
-        for sx, sy in candidate_sources:
-            ssd = 0
-            for dx, dy, tr, tg, tb in known_pixels:
-                src_pix_idx = ((sy + dy) * width + (sx + dx)) * channels
-                dr = tr - img_bytes[src_pix_idx]
-                dg = tg - img_bytes[src_pix_idx + 1]
-                db = tb - img_bytes[src_pix_idx + 2]
-                ssd += dr * dr + dg * dg + db * db
-                if ssd >= best_ssd:
-                    break
-            else:
-                if ssd < best_ssd:
-                    best_ssd = ssd
-                    best_source = (sx, sy)
-
-        if best_source is None:
-            best_source = candidate_sources[0] if candidate_sources else None
-            if not best_source:
-                break
-
-        sx, sy = best_source
-        filled_pixels = []
-        for dy in range(-r, r + 1):
-            ty = py + dy
-            if 0 <= ty < height:
-                row_t = ty * width
-                row_s = (sy + dy) * width
-                for dx in range(-r, r + 1):
-                    tx = px + dx
-                    if 0 <= tx < width:
-                        t_idx = row_t + tx
-                        if mask[t_idx] == 1:
-                            s_idx = row_s + (sx + dx)
-                            t_pix = t_idx * channels
-                            s_pix = s_idx * channels
-                            img_bytes[t_pix] = img_bytes[s_pix]
-                            img_bytes[t_pix + 1] = img_bytes[s_pix + 1]
-                            img_bytes[t_pix + 2] = img_bytes[s_pix + 2]
-                            if channels == 4:
-                                img_bytes[t_pix + 3] = 255
-                            r_c = img_bytes[t_pix]
-                            g_c = img_bytes[t_pix + 1]
-                            b_c = img_bytes[t_pix + 2]
-                            gray[t_idx] = 0.299 * r_c + 0.587 * g_c + 0.114 * b_c
-                            confidence[t_idx] = best_c
-                            mask[t_idx] = 0
-                            hole_count -= 1
-                            filled_pixels.append((tx, ty))
-
-        for fx, fy in filled_pixels:
-            if (fx, fy) in front:
-                front.remove((fx, fy))
-
-        to_remove = [p for p in front if mask[p[1] * width + p[0]] == 0]
-        for p in to_remove:
-            front.remove(p)
-
-        for fx, fy in filled_pixels:
-            for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                nx = fx + ndx
-                ny = py + ndy
-                if 0 <= nx < width and 0 <= ny < height:
-                    n_idx = ny * width + nx
-                    if mask[n_idx] == 1:
-                        front.add((nx, ny))
-
-    return img_bytes
-
-
-# ============================================================================
-# Interactive Dialog with User Sampling Controls (Gtk 3)
+# Modern GTK 3 Dialog Interface
 # ============================================================================
 
 class ContentAwareFillDialog(Gtk.Dialog):
@@ -886,7 +271,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
             title=_("Content-Aware Fill"),
             flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
         )
-        self.set_default_size(540, 480)
+        self.set_default_size(560, 520)
         self.set_resizable(False)
 
         self.image = image
@@ -903,22 +288,20 @@ class ContentAwareFillDialog(Gtk.Dialog):
         content.set_margin_top(14)
         content.set_margin_bottom(14)
 
+        # Header
         header_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         title_label = Gtk.Label()
         title_label.set_markup("<span size='large' weight='bold'>Content-Aware Fill</span>")
         title_label.set_xalign(0.0)
         desc_label = Gtk.Label()
-        desc_label.set_markup(
-            "<span size='small' color='#777777'>"
-            "Photoshop-Grade Global Coherence &amp; Poisson Synthesis"
-            "</span>"
-        )
+        desc_label.set_markup("<span size='small' color='#777777'>Photoshop-Style Multi-Scale Classical Computer Vision Inpainting</span>")
         desc_label.set_xalign(0.0)
         header_box.pack_start(title_label, False, False, 0)
         header_box.pack_start(desc_label, False, False, 0)
         content.pack_start(header_box, False, False, 0)
 
-        frame = Gtk.Frame(label=_("Inpainting Engine & Sampling Controls"))
+        # Settings Frame
+        frame = Gtk.Frame(label=_("Inpainting Engine & Pipeline Settings"))
         grid = Gtk.Grid()
         grid.set_column_spacing(14)
         grid.set_row_spacing(12)
@@ -935,16 +318,15 @@ class ContentAwareFillDialog(Gtk.Dialog):
         grid.attach(algo_label, 0, 0, 1, 1)
 
         self.algo_combo = Gtk.ComboBoxText()
-        self.algo_combo.append_text(_("⚡ Photoshop-Grade Coherence (Seamless & Sharp - Default)"))
+        self.algo_combo.append_text(_("⚡ Photoshop-Grade Pipeline (Pyramid + PatchMatch + Poisson - Default)"))
         self.algo_combo.append_text(_("🎯 Structural Shift-Map (Instant Direct Offset Alignment)"))
         self.algo_combo.append_text(_("💨 Telea Fast Marching (Instant Diffusion - <50ms)"))
-        self.algo_combo.append_text(_("🔬 Classic Criminisi (Exhaustive Isophote Search)"))
         self.algo_combo.set_active(0)
         self.algo_combo.set_hexpand(True)
         self.algo_combo.connect("changed", self._on_algo_changed)
         grid.attach(self.algo_combo, 1, 0, 1, 1)
 
-        # 2. Sampling Source Area (User Definable)
+        # 2. Sampling Area
         source_label = Gtk.Label(label=_("Sampling Area:"))
         source_label.set_xalign(0.0)
         grid.attach(source_label, 0, 1, 1, 1)
@@ -960,17 +342,37 @@ class ContentAwareFillDialog(Gtk.Dialog):
         self.source_combo.set_hexpand(True)
         grid.attach(self.source_combo, 1, 1, 1, 1)
 
-        # Description Label
-        self.algo_desc = Gtk.Label()
-        self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Photoshop-Grade Coherence:</b> Global coherence optimization + harmonic Poisson field. Eliminates cut-off lines and blends seamless textures.</span>")
-        self.algo_desc.set_xalign(0.0)
-        self.algo_desc.set_line_wrap(True)
-        grid.attach(self.algo_desc, 0, 2, 2, 1)
+        # 3. Quality Preset
+        qual_label = Gtk.Label(label=_("Quality:"))
+        qual_label.set_xalign(0.0)
+        grid.attach(qual_label, 0, 2, 1, 1)
 
-        # 3. Patch Size / Radius Slider
+        self.qual_combo = Gtk.ComboBoxText()
+        self.qual_combo.append_text(_("Balanced (Recommended - Fast & Crisp)"))
+        self.qual_combo.append_text(_("High (Maximum EM Iterations & Precision)"))
+        self.qual_combo.append_text(_("Fast (Speed Priority)"))
+        self.qual_combo.set_active(0)
+        self.qual_combo.set_hexpand(True)
+        grid.attach(self.qual_combo, 1, 2, 1, 1)
+
+        # 4. Geometric Adaptation
+        adapt_label = Gtk.Label(label=_("Adaptation:"))
+        adapt_label.set_xalign(0.0)
+        grid.attach(adapt_label, 0, 3, 1, 1)
+
+        self.adapt_combo = Gtk.ComboBoxText()
+        self.adapt_combo.append_text(_("None (Standard Translation)"))
+        self.adapt_combo.append_text(_("Rotation (±30° Angles for Tilted Lines)"))
+        self.adapt_combo.append_text(_("Rotation + Scale (Perspective & Depth)"))
+        self.adapt_combo.append_text(_("Full (Rotation + Scale + Mirroring)"))
+        self.adapt_combo.set_active(0)
+        self.adapt_combo.set_hexpand(True)
+        grid.attach(self.adapt_combo, 1, 3, 1, 1)
+
+        # 5. Patch Size Slider
         self.size_label = Gtk.Label(label=_("Patch Size:"))
         self.size_label.set_xalign(0.0)
-        grid.attach(self.size_label, 0, 3, 1, 1)
+        grid.attach(self.size_label, 0, 4, 1, 1)
 
         self.size_adj = Gtk.Adjustment(value=9, lower=5, upper=25, step_increment=2, page_increment=4)
         self.size_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.size_adj)
@@ -980,58 +382,58 @@ class ContentAwareFillDialog(Gtk.Dialog):
         self.size_scale.add_mark(9, Gtk.PositionType.BOTTOM, "9px (Default)")
         self.size_scale.add_mark(15, Gtk.PositionType.BOTTOM, "15px")
         self.size_scale.add_mark(25, Gtk.PositionType.BOTTOM, "25px")
-        grid.attach(self.size_scale, 1, 3, 1, 1)
+        grid.attach(self.size_scale, 1, 4, 1, 1)
 
-        # 4. Checkboxes
+        # 6. Checkboxes
         check_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.seam_check = Gtk.CheckButton(label=_("Harmonic boundary residual healing"))
-        self.seam_check.set_active(True)
         self.deselect_check = Gtk.CheckButton(label=_("Deselect selection when complete"))
         self.deselect_check.set_active(False)
-        check_box.pack_start(self.seam_check, False, False, 0)
         check_box.pack_start(self.deselect_check, False, False, 0)
-        grid.attach(check_box, 0, 4, 2, 1)
+        grid.attach(check_box, 0, 5, 2, 1)
 
         self.show_all()
 
     def _on_algo_changed(self, combo):
         algo = combo.get_active()
         if algo == 0:
-            self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Photoshop-Grade Coherence:</b> Global coherence optimization + harmonic Poisson field. Eliminates cut-off lines and blends seamless textures.</span>")
             self.source_combo.set_sensitive(True)
-            self.size_scale.set_visible(True)
-            self.size_label.set_visible(True)
+            self.qual_combo.set_sensitive(True)
+            self.adapt_combo.set_sensitive(True)
+            self.size_scale.set_sensitive(True)
         elif algo == 1:
-            self.algo_desc.set_markup("<span size='small' color='#3388bb'>🎯 <b>Structural Shift-Map:</b> Direct single-shift alignment for uniform direction transfer.</span>")
             self.source_combo.set_sensitive(True)
-            self.size_scale.set_visible(False)
-            self.size_label.set_visible(False)
+            self.qual_combo.set_sensitive(False)
+            self.adapt_combo.set_sensitive(False)
+            self.size_scale.set_sensitive(False)
         elif algo == 2:
-            self.algo_desc.set_markup("<span size='small' color='#229955'>⚡ <b>Fast Marching (Telea):</b> Instantaneous diffusion (<50ms). Best for scratches, wires, spots, text.</span>")
             self.source_combo.set_sensitive(False)
-            self.size_scale.set_visible(True)
-            self.size_label.set_visible(True)
-        elif algo == 3:
-            self.algo_desc.set_markup("<span size='small' color='#8844aa'>🔬 <b>Classic Criminisi:</b> Exhaustive isophote search. Sharp geometric structure continuation.</span>")
-            self.source_combo.set_sensitive(False)
-            self.size_scale.set_visible(True)
-            self.size_label.set_visible(True)
+            self.qual_combo.set_sensitive(False)
+            self.adapt_combo.set_sensitive(False)
+            self.size_scale.set_sensitive(True)
 
     def get_settings(self):
         val = int(self.size_adj.get_value())
-        if val % 2 == 0:
-            val += 1
+        if val % 2 == 0: val += 1
         radius = max(2, val // 2)
 
         src_idx = self.source_combo.get_active()
         sources = ["auto", "right", "left", "above", "below", "all"]
         sample_source = sources[src_idx] if src_idx < len(sources) else "auto"
 
+        qual_idx = self.qual_combo.get_active()
+        qualities = ["balanced", "high", "fast"]
+        quality = qualities[qual_idx] if qual_idx < len(qualities) else "balanced"
+
+        adapt_idx = self.adapt_combo.get_active()
+        adaptations = ["none", "rotation", "scale", "full"]
+        adaptation = adaptations[adapt_idx] if adapt_idx < len(adaptations) else "none"
+
         return {
             "algo": self.algo_combo.get_active(),
             "source": sample_source,
+            "quality": quality,
+            "adaptation": adaptation,
             "radius": radius,
-            "seam": self.seam_check.get_active(),
             "deselect": self.deselect_check.get_active(),
         }
 
@@ -1062,7 +464,7 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
             procedure.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
             procedure.set_documentation(
                 _("Photoshop-Grade Content-Aware Fill"),
-                _("Fills selected region seamlessly using Photoshop-Grade Coherence, Structural Shift-Map, Fast Marching, or Criminisi."),
+                _("Fills selected region seamlessly using multi-scale PatchMatch, structure tensors, and Poisson blending."),
                 name,
             )
             procedure.set_menu_label(_("Content-Aware Fill..."))
@@ -1085,7 +487,7 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                 Gimp.message(
                     _("No active selection found!\n\n"
                       "Please make a selection around the object or region you want to fill "
-                      "(e.g. using the Free Select / Lasso or Rectangle Select tool), "
+                      "(e.g. using Free Select, Rectangle Select, or Magic Wand), "
                       "then run Content-Aware Fill.")
                 )
                 return procedure.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, None)
@@ -1102,10 +504,11 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                 return procedure.new_return_values(Gimp.PDBStatusType.CALLING_ERROR, None)
 
             settings = {
-                "algo": 0,          # Photoshop-Grade Coherence (Default)
-                "source": "auto",   # Smart Context Sampling
-                "radius": 4,        # 9x9 patch
-                "seam": True,
+                "algo": 0,
+                "source": "auto",
+                "quality": "balanced",
+                "adaptation": "none",
+                "radius": 4,
                 "deselect": False,
             }
 
@@ -1185,8 +588,8 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
             algo = settings["algo"]
             radius = settings["radius"]
 
-            if algo == 0:  # Photoshop-Grade Coherence (Default)
-                inpainted_bytes = inpaint_photoshop_coherence(
+            if algo == 0:  # Photoshop-Grade Full Modular Pipeline (Default)
+                inpainted_bytes = execute_content_aware_fill_pipeline(
                     img_bytes=img_bytes,
                     mask_bytes=mask_bytes,
                     width=roi_w,
@@ -1194,8 +597,9 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                     channels=channels,
                     patch_radius=radius,
                     sample_source=settings["source"],
-                    num_em_iters=2,
-                    progress_callback=progress_cb,
+                    adaptation_mode=settings["adaptation"],
+                    quality_preset=settings["quality"],
+                    progress_callback=progress_cb
                 )
             elif algo == 1:  # Structural Shift-Map
                 inpainted_bytes = inpaint_structural_shiftmap(
@@ -1205,10 +609,10 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                     height=roi_h,
                     channels=channels,
                     sample_source=settings["source"],
-                    seam_blend=settings["seam"],
+                    seam_blend=True,
                     progress_callback=progress_cb,
                 )
-            elif algo == 2:  # Telea Fast Marching
+            else:  # Telea Fast Marching
                 inpainted_bytes = inpaint_telea(
                     img_bytes=img_bytes,
                     mask_bytes=mask_bytes,
@@ -1216,16 +620,6 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                     height=roi_h,
                     channels=channels,
                     radius=radius,
-                    progress_callback=progress_cb,
-                )
-            else:  # Classic Criminisi
-                inpainted_bytes = inpaint_criminisi(
-                    img_bytes=img_bytes,
-                    mask_bytes=mask_bytes,
-                    width=roi_w,
-                    height=roi_h,
-                    channels=channels,
-                    patch_radius=radius,
                     progress_callback=progress_cb,
                 )
 
@@ -1243,7 +637,7 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
             Gimp.displays_flush()
             Gimp.progress_end()
 
-            print(f"[Content-Aware Fill] Inpainted {roi_w}x{roi_h} using engine {algo} in {elapsed:.2f}s")
+            print(f"[Content-Aware Fill] Inpainted {roi_w}x{roi_h} in {elapsed:.2f}s")
             return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
 
         except Exception as exc:
