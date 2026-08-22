@@ -4,7 +4,7 @@
 Photoshop-Grade Content-Aware Fill Plugin for GIMP 3
 ===================================================
 State-of-the-Art Inpainting Suite:
-1. ⚡ Masked Structural PatchMatch (Default - 100% Sharp Texture & Structural Continuity)
+1. ⚡ Masked Structural PatchMatch (Default - Razor Sharp Textures & Structural Alignment)
 2. 🎯 Structural Shift-Map (Instant <0.04s Direct Single-Offset Transfer)
 3. 💨 Telea Fast Marching (Instant Diffusion for Scratches/Wires/Text)
 4. 🔬 Classic Criminisi (Exhaustive Isophote Priority Synthesis)
@@ -129,6 +129,7 @@ def inpaint_structural_patchmatch(
 
     best_global_score = float('inf')
     best_global_shift = (0, 0)
+    ranked_shifts = []
 
     for dy in dy_cands:
         for dx in dx_cands:
@@ -155,12 +156,16 @@ def inpaint_structural_patchmatch(
 
             if tested >= max(4, num_eval // 4):
                 avg_err = ssd / float(tested)
+                ranked_shifts.append((avg_err, dx, dy))
                 if avg_err < best_global_score:
                     best_global_score = avg_err
                     best_global_shift = (dx, dy)
 
+    ranked_shifts.sort(key=lambda item: item[0])
+    top_priors = [shift for _, shift in [(err, (dx, dy)) for err, dx, dy in ranked_shifts[:4]]]
+
     bg_dx, bg_dy = best_global_shift
-    priors = [(bg_dx, bg_dy)]
+    priors = [(bg_dx, bg_dy)] + top_priors
     for fdy in (-2, 0, 2):
         for fdx in (-2, 0, 2):
             if (bg_dx + fdx, bg_dy + fdy) != (0, 0):
@@ -172,7 +177,7 @@ def inpaint_structural_patchmatch(
         if (ox, oy) not in seen:
             seen.add((ox, oy))
             valid_priors.append((ox, oy))
-    valid_priors = valid_priors[:6]
+    valid_priors = valid_priors[:8]
 
     # 2. Local Masked Patch Synthesis with Neighbor Propagation
     sample_offsets = [
@@ -267,6 +272,8 @@ def inpaint_structural_patchmatch(
             if best_d == float('inf'):
                 best_sx = max(r, min(width - 1 - r, px + bg_dx))
                 best_sy = max(r, min(height - 1 - r, py + bg_dy))
+                if mask_bytes[best_sy * width + best_sx] > 10:
+                    best_sx, best_sy = known_centers[0]
 
             nnf_x[p_idx] = best_sx
             nnf_y[p_idx] = best_sy
@@ -808,7 +815,7 @@ def inpaint_criminisi(img_bytes, mask_bytes, width, height, channels=4, patch_ra
         for fx, fy in filled_pixels:
             for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 nx = fx + ndx
-                ny = fy + ndy
+                ny = py + ndy
                 if 0 <= nx < width and 0 <= ny < height:
                     n_idx = ny * width + nx
                     if mask[n_idx] == 1:
@@ -827,7 +834,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
             title=_("Content-Aware Fill"),
             flags=Gtk.DialogFlags.MODAL | Gtk.DialogFlags.DESTROY_WITH_PARENT,
         )
-        self.set_default_size(540, 460)
+        self.set_default_size(540, 480)
         self.set_resizable(False)
 
         self.image = image
@@ -851,7 +858,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
         desc_label = Gtk.Label()
         desc_label.set_markup(
             "<span size='small' color='#777777'>"
-            "High-Speed Masked Structural Synthesis"
+            "High-Speed Masked Structural Synthesis &amp; Object Removal"
             "</span>"
         )
         desc_label.set_xalign(0.0)
@@ -892,10 +899,10 @@ class ContentAwareFillDialog(Gtk.Dialog):
 
         self.source_combo = Gtk.ComboBoxText()
         self.source_combo.append_text(_("Auto (Smart Context Continuation)"))
-        self.source_combo.append_text(_("Sample from Right → (Extend Textures/Patterns Leftward)"))
-        self.source_combo.append_text(_("Sample from Left ← (Extend Textures/Patterns Rightward)"))
-        self.source_combo.append_text(_("Sample from Above ↓ (Extend Vertical Textures Downward)"))
-        self.source_combo.append_text(_("Sample from Below ↑ (Extend Vertical Textures Upward)"))
+        self.source_combo.append_text(_("Sample from Right → (Clone clean background from right)"))
+        self.source_combo.append_text(_("Sample from Left ← (Clone clean background from left)"))
+        self.source_combo.append_text(_("Sample from Above ↓ (Clone clean background from top)"))
+        self.source_combo.append_text(_("Sample from Below ↑ (Clone clean background from bottom)"))
         self.source_combo.append_text(_("All Around (Surrounding Margin)"))
         self.source_combo.set_active(0)
         self.source_combo.set_hexpand(True)
