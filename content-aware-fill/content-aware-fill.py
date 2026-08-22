@@ -232,7 +232,7 @@ def inpaint_structural_patchmatch(
 
         front_sorted.sort(reverse=True, key=lambda item: item[0])
 
-        for _, px, py in front_sorted:
+        for k_cnt, px, py in front_sorted:
             p_idx = py * width + px
             if mask[p_idx] == 0:
                 continue
