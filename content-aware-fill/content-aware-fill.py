@@ -57,7 +57,7 @@ def inpaint_structural_shiftmap(
 ):
     """
     Ultra-Fast (<0.08s) & 100% Structurally Accurate Inpainting.
-    Synthesizes repeating textures, book rows, and shelves with zero blur.
+    Synthesizes repeating textures, patterns, and geometric lines with zero blur.
     """
     total = width * height
 
@@ -217,7 +217,7 @@ def inpaint_structural_shiftmap(
     if seam_blend:
         if progress_callback:
             progress_callback(0.90, _("Blending boundary seams..."))
-        for _ in range(3):
+        for seam_pass in range(3):
             for sx, sy in band_pixels:
                 s_idx = sy * width + sx
                 for c in range(min(3, channels)):
@@ -794,12 +794,12 @@ class ContentAwareFillDialog(Gtk.Dialog):
 
         header_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         title_label = Gtk.Label()
-        title_label.set_markup("<span size='large' weight='bold'>Photoshop-Grade Content-Aware Fill</span>")
+        title_label.set_markup("<span size='large' weight='bold'>Content-Aware Fill</span>")
         title_label.set_xalign(0.0)
         desc_label = Gtk.Label()
         desc_label.set_markup(
             "<span size='small' color='#777777'>"
-            "Structural Texture Continuation with Sampling Area Controls"
+            "High-Speed Texture Synthesis with Sampling Area Controls"
             "</span>"
         )
         desc_label.set_xalign(0.0)
@@ -824,7 +824,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
         grid.attach(algo_label, 0, 0, 1, 1)
 
         self.algo_combo = Gtk.ComboBoxText()
-        self.algo_combo.append_text(_("⚡ Structural Shift-Map (Photoshop CAF - Instant <0.1s)"))
+        self.algo_combo.append_text(_("⚡ Structural Shift-Map (Instant <0.1s - Default)"))
         self.algo_combo.append_text(_("🔄 Multi-Pass PatchMatch (Dense 2D Search)"))
         self.algo_combo.append_text(_("💨 Telea Fast Marching (Instant Diffusion - <50ms)"))
         self.algo_combo.append_text(_("🔬 Classic Criminisi (Exhaustive Isophote Search)"))
@@ -840,10 +840,10 @@ class ContentAwareFillDialog(Gtk.Dialog):
 
         self.source_combo = Gtk.ComboBoxText()
         self.source_combo.append_text(_("Auto (Smart Context Continuation)"))
-        self.source_combo.append_text(_("Sample from Right → (Extend Row of Books / Shelves Leftward)"))
-        self.source_combo.append_text(_("Sample from Left ← (Extend Content Rightward)"))
-        self.source_combo.append_text(_("Sample from Above ↓ (Extend Vertical Pillars / Walls Downward)"))
-        self.source_combo.append_text(_("Sample from Below ↑ (Extend Vertical Content Upward)"))
+        self.source_combo.append_text(_("Sample from Right → (Extend Textures/Patterns Leftward)"))
+        self.source_combo.append_text(_("Sample from Left ← (Extend Textures/Patterns Rightward)"))
+        self.source_combo.append_text(_("Sample from Above ↓ (Extend Vertical Textures Downward)"))
+        self.source_combo.append_text(_("Sample from Below ↑ (Extend Vertical Textures Upward)"))
         self.source_combo.append_text(_("All Around (Surrounding Margin)"))
         self.source_combo.set_active(0)
         self.source_combo.set_hexpand(True)
@@ -851,7 +851,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
 
         # Description Label
         self.algo_desc = Gtk.Label()
-        self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Recommended:</b> Ultra-fast (<0.1s) structural continuation of books, shelves, and wood grain.</span>")
+        self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Recommended:</b> Ultra-fast (<0.1s) structural continuation of repeating patterns, lines, and textures.</span>")
         self.algo_desc.set_xalign(0.0)
         self.algo_desc.set_line_wrap(True)
         grid.attach(self.algo_desc, 0, 2, 2, 1)
@@ -886,7 +886,7 @@ class ContentAwareFillDialog(Gtk.Dialog):
     def _on_algo_changed(self, combo):
         algo = combo.get_active()
         if algo == 0:
-            self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Structural Shift-Map:</b> Ultra-fast (<0.1s) structural continuation of books, shelves, and wood grain.</span>")
+            self.algo_desc.set_markup("<span size='small' color='#3388bb'>★ <b>Structural Shift-Map:</b> Ultra-fast (<0.1s) structural continuation of repeating patterns, lines, and textures.</span>")
             self.source_combo.set_sensitive(True)
             self.size_scale.set_visible(False)
             self.size_label.set_visible(False)
@@ -950,7 +950,7 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
             procedure.set_image_types("RGB*, GRAY*")
             procedure.set_sensitivity_mask(Gimp.ProcedureSensitivityMask.DRAWABLE)
             procedure.set_documentation(
-                _("Photoshop-Grade Content-Aware Fill"),
+                _("Content-Aware Fill"),
                 _("Fills selected region seamlessly using Structural Shift-Map, PatchMatch, Fast Marching, or Criminisi."),
                 name,
             )
