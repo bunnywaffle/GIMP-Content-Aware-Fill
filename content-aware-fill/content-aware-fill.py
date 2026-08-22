@@ -37,8 +37,10 @@ from gi.repository import Gimp, GimpUi, Gegl, Gtk, GLib, GObject
 Gegl.init(None)
 
 
-def _(msg):
+def _tr(msg):
     return GLib.dgettext(None, msg)
+
+_ = _tr
 
 
 # ============================================================================
@@ -103,11 +105,11 @@ def inpaint_photoshop_coherence(
     sel_h = max_y - min_y + 1
 
     if progress_callback:
-        progress_callback(0.08, _("Initializing smooth boundary field..."))
+        progress_callback(0.08, _tr("Initializing smooth boundary field..."))
 
     # 1. Harmonic Poisson Initialization for smooth boundary interpolation
     work_img = bytearray(img_bytes)
-    for _ in range(6):
+    for init_step in range(6):
         for x, y in hole_pixels:
             idx = y * width + x
             for c in range(min(3, channels)):
@@ -193,7 +195,7 @@ def inpaint_photoshop_coherence(
     # 3. Fast EM Optimization Loop
     for em_iter in range(num_em_iters):
         if progress_callback:
-            progress_callback(0.20 + 0.35 * em_iter, _("Coherence optimization pass %d/%d...") % (em_iter+1, num_em_iters))
+            progress_callback(0.20 + 0.35 * em_iter, _tr("Coherence optimization pass %d/%d...") % (em_iter+1, num_em_iters))
 
         is_fwd = (em_iter % 2 == 0)
         holes = holes_fwd if is_fwd else holes_rev
@@ -274,7 +276,7 @@ def inpaint_photoshop_coherence(
 
     # 4. Global Poisson / Harmonic Residual Healing
     if progress_callback:
-        progress_callback(0.92, _("Harmonic boundary seam blending..."))
+        progress_callback(0.92, _tr("Harmonic boundary seam blending..."))
 
     residual_r = array.array('f', [0.0] * total)
     residual_g = array.array('f', [0.0] * total)
@@ -293,7 +295,7 @@ def inpaint_photoshop_coherence(
                 residual_b[b_idx] = img_bytes[n_pix + 2] - work_img[b_pix + 2]
                 break
 
-    for _ in range(8):
+    for diff_step in range(8):
         for x, y in hole_pixels:
             idx = y * width + x
             sum_r = 0.0
