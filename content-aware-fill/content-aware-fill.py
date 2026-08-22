@@ -625,13 +625,65 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
 
             elapsed = time.time() - t0
 
-            # Seamless Feathered Compositing: Preserves 100% of original pixels outside selection
-            # and blends anti-aliased selection edges smoothly
+            # C1-Smooth Cosine Distance Feather Compositing (Zero-Hard-Edge Guarantee)
+            total_pix = roi_w * roi_h
+            dist_map = array.array('f', [999.0] * total_pix)
+
+            # 1. Identify outer perimeter boundary pixels
+            for y in range(roi_h):
+                row = y * roi_w
+                for x in range(roi_w):
+                    idx = row + x
+                    if mask_bytes[idx] > 10:
+                        is_bound = False
+                        for ndx, ndy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                            nx, ny = x + ndx, y + ndy
+                            if 0 <= nx < roi_w and 0 <= ny < roi_h:
+                                if mask_bytes[ny * roi_w + nx] <= 10:
+                                    is_bound = True
+                                    break
+                            else:
+                                is_bound = True
+                                break
+                        if is_bound:
+                            dist_map[idx] = 0.0
+
+            # 2. Fast 2-pass distance transform
+            for y in range(roi_h):
+                row = y * roi_w
+                for x in range(roi_w):
+                    idx = row + x
+                    if mask_bytes[idx] > 10 and dist_map[idx] > 0.0:
+                        d = dist_map[idx]
+                        if x > 0: d = min(d, dist_map[idx - 1] + 1.0)
+                        if y > 0: d = min(d, dist_map[idx - roi_w] + 1.0)
+                        if x > 0 and y > 0: d = min(d, dist_map[idx - roi_w - 1] + 1.414)
+                        dist_map[idx] = d
+
+            for y in range(roi_h - 1, -1, -1):
+                row = y * roi_w
+                for x in range(roi_w - 1, -1, -1):
+                    idx = row + x
+                    if mask_bytes[idx] > 10:
+                        d = dist_map[idx]
+                        if x < roi_w - 1: d = min(d, dist_map[idx + 1] + 1.0)
+                        if y < roi_h - 1: d = min(d, dist_map[idx + roi_w] + 1.0)
+                        if x < roi_w - 1 and y < roi_h - 1: d = min(d, dist_map[idx + roi_w + 1] + 1.414)
+                        dist_map[idx] = d
+
+            # 3. Apply Cosine Feather Ramp to Composite Result
+            feather_dist = 4.0
             final_bytes = bytearray(img_bytes)
-            for idx in range(roi_w * roi_h):
+            for idx in range(total_pix):
                 m_val = mask_bytes[idx]
-                if m_val > 0:
-                    alpha_m = m_val / 255.0
+                if m_val > 10:
+                    d = dist_map[idx]
+                    if d >= feather_dist:
+                        alpha_f = 1.0
+                    else:
+                        alpha_f = 0.5 * (1.0 - math.cos(math.pi * d / feather_dist))
+                    alpha_m = alpha_f * (m_val / 255.0)
+
                     p = idx * channels
                     for c in range(min(3, channels)):
                         final_bytes[p + c] = max(0, min(255, int(round(inpainted_bytes[p + c] * alpha_m + img_bytes[p + c] * (1.0 - alpha_m)))))
