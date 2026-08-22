@@ -4,9 +4,9 @@
 Module 12: Gradient-Domain / Screened Poisson Blending
 ======================================================
 Solves the harmonic Laplace/Poisson equation:
-  nabla^2 Delta = 0, subject to Delta|_boundary = I_orig - I_synth
-- Seamlessly blends global lighting, exposure, and color temperature
-- Completely eliminates all cut-off lines and collision steps
+  nabla^2 Delta = 0, subject to Delta|_boundary = clamp(I_orig - I_synth)
+- Seamlessly blends global lighting and exposure gradients
+- Prevents cross-structural color bleeding between distinct image regions
 - Preserves 100% of fine high-frequency synthesized texture
 """
 
@@ -20,11 +20,12 @@ def solve_poisson_residual_blending(
     width,
     height,
     channels=4,
-    num_iterations=10,
+    num_iterations=8,
     progress_callback=None
 ):
     """
-    Executes fast harmonic Poisson residual diffusion across the hole.
+    Executes robust harmonic Poisson residual diffusion across the hole.
+    Clamps extreme structural jumps to prevent cross-border color bleeding.
     """
     total = width * height
     boundary_pixels = mask_analysis.boundary_pixels
@@ -38,7 +39,7 @@ def solve_poisson_residual_blending(
     residual_g = array.array('f', [0.0] * total)
     residual_b = array.array('f', [0.0] * total)
 
-    # 1. Boundary Residual Conditions: Delta = I_orig - I_synth
+    # 1. Boundary Residual Conditions: Delta = clamp(I_orig - I_synth, -35, +35)
     for bx, by in boundary_pixels:
         b_idx = by * width + bx
         b_pix = b_idx * channels
@@ -47,9 +48,14 @@ def solve_poisson_residual_blending(
             ny = by + ndy
             if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in hole_set:
                 n_pix = (ny * width + nx) * channels
-                residual_r[b_idx] = src_img[n_pix] - work_img[b_pix]
-                residual_g[b_idx] = src_img[n_pix + 1] - work_img[b_pix + 1]
-                residual_b[b_idx] = src_img[n_pix + 2] - work_img[b_pix + 2]
+                diff_r = float(src_img[n_pix] - work_img[b_pix])
+                diff_g = float(src_img[n_pix + 1] - work_img[b_pix + 1])
+                diff_b = float(src_img[n_pix + 2] - work_img[b_pix + 2])
+
+                # Clamp residuals to prevent cross-structural bleeds
+                residual_r[b_idx] = max(-35.0, min(35.0, diff_r))
+                residual_g[b_idx] = max(-35.0, min(35.0, diff_g))
+                residual_b[b_idx] = max(-35.0, min(35.0, diff_b))
                 break
 
     # 2. Multi-Pass Jacobi Relaxation: Delta(x, y) = 1/4 * sum_{neighbors} Delta(nx, ny)

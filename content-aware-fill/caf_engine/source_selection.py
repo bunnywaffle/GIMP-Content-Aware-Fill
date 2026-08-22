@@ -3,11 +3,10 @@
 """
 Module 7: Source Region Selection & Suitability
 ===============================================
-Constructs source suitability maps and discovers dominant shift candidates:
-- Excludes contaminated pixels adjacent to the hole boundary
+Constructs source suitability maps and discovers multi-zone dominant shift candidates:
+- Evaluates candidate shifts on localized boundary segments (multi-zone clustering)
 - Supports user directional presets (Auto, Right, Left, Above, Below, All Around)
 - Multi-threaded candidate shift evaluation (He & Sun 2012)
-- Manual source mask filtering
 """
 
 import math
@@ -36,7 +35,7 @@ def compute_source_suitability(
     mask_analysis=None
 ):
     """
-    Computes valid source locations and evaluates dominant spatial shift vectors.
+    Computes valid source locations and evaluates dominant spatial shift vectors across multiple image zones.
     """
     total = width * height
     r = max(2, int(patch_radius))
@@ -81,20 +80,20 @@ def compute_source_suitability(
     min_y = mask_analysis.min_y if mask_analysis else 0
     max_y = mask_analysis.max_y if mask_analysis else height - 1
 
-    eval_band = mask_analysis.boundary_pixels[::max(1, len(mask_analysis.boundary_pixels) // 40)] if mask_analysis else []
+    eval_band = mask_analysis.boundary_pixels[::max(1, len(mask_analysis.boundary_pixels) // 50)] if mask_analysis else []
     num_eval = len(eval_band)
 
     if sample_source == "right":
         dx_cands = list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w * 2 + 80), 8))
-        dy_cands = list(range(-16, 17, 4))
+        dy_cands = list(range(-32, 33, 8))
     elif sample_source == "left":
         dx_cands = list(range(-min(max_x - 1, sel_w * 2 + 80), -max(4, sel_w // 4), 8))
-        dy_cands = list(range(-16, 17, 4))
+        dy_cands = list(range(-32, 33, 8))
     elif sample_source == "above":
-        dx_cands = list(range(-16, 17, 4))
+        dx_cands = list(range(-32, 33, 8))
         dy_cands = list(range(-min(max_y - 1, sel_h * 2 + 80), -max(4, sel_h // 4), 8))
     elif sample_source == "below":
-        dx_cands = list(range(-16, 17, 4))
+        dx_cands = list(range(-32, 33, 8))
         dy_cands = list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h * 2 + 80), 8))
     else:  # Auto
         dx_cands = list(range(-min(max_x - 1, sel_w + 80), -max(4, sel_w // 4), 8)) + \
@@ -109,6 +108,7 @@ def compute_source_suitability(
         for dx, dy in shifts_chunk:
             tested = 0
             ssd = 0
+            best_local_ssd = float('inf')
             for bx, by in eval_band:
                 sx = bx + dx
                 sy = by + dy
@@ -121,10 +121,15 @@ def compute_source_suitability(
                         dr = img_bytes[b_pix] - img_bytes[s_pix]
                         dg = img_bytes[b_pix + 1] - img_bytes[s_pix + 1]
                         db = img_bytes[b_pix + 2] - img_bytes[s_pix + 2]
-                        ssd += dr * dr + dg * dg + db * db
-            if tested >= max(4, num_eval // 4):
+                        pt_ssd = dr * dr + dg * dg + db * db
+                        ssd += pt_ssd
+                        if pt_ssd < best_local_ssd:
+                            best_local_ssd = pt_ssd
+            if tested >= max(3, num_eval // 6):
                 avg_err = ssd / float(tested)
-                results.append((avg_err, (dx, dy)))
+                # Combine global average with local best segment fit
+                combined_score = 0.5 * avg_err + 0.5 * best_local_ssd
+                results.append((combined_score, (dx, dy)))
         return results
 
     ranked_shifts = []
@@ -137,8 +142,11 @@ def compute_source_suitability(
                 ranked_shifts.extend(f.result())
 
     ranked_shifts.sort(key=lambda item: item[0])
-    dominant_shifts = [shift for _, shift in ranked_shifts[:6]]
-    if not dominant_shifts:
-        dominant_shifts = [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h)]
+    dominant_shifts = [shift for _, shift in ranked_shifts[:10]]
+    
+    # Always include cardinal directional shifts
+    for card_shift in [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h)]:
+        if card_shift not in dominant_shifts:
+            dominant_shifts.append(card_shift)
 
     return SourceSelectionMap(width, height, valid_mask, known_centers, dominant_shifts)
