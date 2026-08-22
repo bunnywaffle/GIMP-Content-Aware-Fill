@@ -81,7 +81,7 @@ def execute_content_aware_fill_pipeline(
     report(0.24, "Evaluating candidate source regions & dominant shifts...")
     source_sel = compute_source_suitability(
         img_bytes, mask_bytes, width, height, channels,
-        patch_radius, sample_source, manual_source_mask, mask_res
+        patch_radius, sample_source, manual_source_mask, mask_res, trajectories
     )
 
     # 5. Multi-Scale Image Pyramid

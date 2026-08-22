@@ -3,7 +3,8 @@
 """
 Module 7: Source Region Selection & Suitability
 ===============================================
-Constructs source suitability maps and discovers multi-zone dominant shift candidates:
+Constructs source suitability maps and discovers multi-zone & isophote-aligned shift candidates:
+- Generates candidate shifts aligned with dominant structural trajectories and perspective angles
 - Evaluates candidate shifts on localized boundary segments (multi-zone clustering)
 - Supports user directional presets (Auto, Right, Left, Above, Below, All Around)
 - Multi-threaded candidate shift evaluation (He & Sun 2012)
@@ -32,10 +33,12 @@ def compute_source_suitability(
     patch_radius=4,
     sample_source="auto",
     manual_source_mask=None,
-    mask_analysis=None
+    mask_analysis=None,
+    trajectories=None
 ):
     """
-    Computes valid source locations and evaluates dominant spatial shift vectors across multiple image zones.
+    Computes valid source locations and evaluates dominant spatial shift vectors
+    including isophote-aligned diagonal and perspective vectors.
     """
     total = width * height
     r = max(2, int(patch_radius))
@@ -84,24 +87,39 @@ def compute_source_suitability(
     num_eval = len(eval_band)
 
     if sample_source == "right":
-        dx_cands = list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w * 2 + 80), 8))
-        dy_cands = list(range(-32, 33, 8))
+        dx_cands = list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w * 2 + 100), 8))
+        dy_cands = list(range(-48, 49, 8))
     elif sample_source == "left":
-        dx_cands = list(range(-min(max_x - 1, sel_w * 2 + 80), -max(4, sel_w // 4), 8))
-        dy_cands = list(range(-32, 33, 8))
+        dx_cands = list(range(-min(max_x - 1, sel_w * 2 + 100), -max(4, sel_w // 4), 8))
+        dy_cands = list(range(-48, 49, 8))
     elif sample_source == "above":
-        dx_cands = list(range(-32, 33, 8))
-        dy_cands = list(range(-min(max_y - 1, sel_h * 2 + 80), -max(4, sel_h // 4), 8))
+        dx_cands = list(range(-48, 49, 8))
+        dy_cands = list(range(-min(max_y - 1, sel_h * 2 + 100), -max(4, sel_h // 4), 8))
     elif sample_source == "below":
-        dx_cands = list(range(-32, 33, 8))
-        dy_cands = list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h * 2 + 80), 8))
+        dx_cands = list(range(-48, 49, 8))
+        dy_cands = list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h * 2 + 100), 8))
     else:  # Auto
-        dx_cands = list(range(-min(max_x - 1, sel_w + 80), -max(4, sel_w // 4), 8)) + \
-                    list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w + 80), 8)) + [0]
-        dy_cands = list(range(-min(max_y - 1, sel_h + 80), -max(4, sel_h // 4), 8)) + \
-                    list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h + 80), 8)) + [0]
+        dx_cands = list(range(-min(max_x - 1, sel_w + 100), -max(4, sel_w // 4), 8)) + \
+                    list(range(max(4, sel_w // 4), min(width - min_x - 1, sel_w + 100), 8)) + [0]
+        dy_cands = list(range(-min(max_y - 1, sel_h + 100), -max(4, sel_h // 4), 8)) + \
+                    list(range(max(4, sel_h // 4), min(height - min_y - 1, sel_h + 100), 8)) + [0]
 
     all_candidate_shifts = [(dx, dy) for dy in dy_cands for dx in dx_cands if (dx != 0 or dy != 0)]
+
+    # Add trajectory/isophote aligned diagonal shifts
+    if trajectories:
+        for traj in trajectories:
+            cos_t = math.cos(traj.angle)
+            sin_t = math.sin(traj.angle)
+            for step in range(-max(sel_w, sel_h), max(sel_w, sel_h) + 1, 16):
+                if step == 0: continue
+                # Parallel to trajectory
+                all_candidate_shifts.append((int(round(step * cos_t)), int(round(step * sin_t))))
+                # Perpendicular to trajectory (shelf intervals)
+                all_candidate_shifts.append((int(round(-step * sin_t)), int(round(step * cos_t))))
+
+    # Deduplicate candidates
+    all_candidate_shifts = list(set(all_candidate_shifts))
 
     def evaluate_shift_chunk(shifts_chunk):
         results = []
@@ -127,7 +145,6 @@ def compute_source_suitability(
                             best_local_ssd = pt_ssd
             if tested >= max(3, num_eval // 6):
                 avg_err = ssd / float(tested)
-                # Combine global average with local best segment fit
                 combined_score = 0.5 * avg_err + 0.5 * best_local_ssd
                 results.append((combined_score, (dx, dy)))
         return results
@@ -142,9 +159,8 @@ def compute_source_suitability(
                 ranked_shifts.extend(f.result())
 
     ranked_shifts.sort(key=lambda item: item[0])
-    dominant_shifts = [shift for _, shift in ranked_shifts[:10]]
-    
-    # Always include cardinal directional shifts
+    dominant_shifts = [shift for _, shift in ranked_shifts[:12]]
+
     for card_shift in [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h)]:
         if card_shift not in dominant_shifts:
             dominant_shifts.append(card_shift)
