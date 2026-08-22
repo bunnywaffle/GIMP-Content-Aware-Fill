@@ -67,8 +67,11 @@ def run_perspective_patchmatch(
                     zone_known_centers[z] = []
                 zone_known_centers[z].append((x, y))
 
-    # Fallback for empty zones: all known centers
-    all_known = [ (x, y) for y in range(r, height - r) for x in range(r, width - r) if mask_grid[y * width + x] == 0 ]
+    # Fallback for empty zones: all valid opaque known centers
+    all_known = [
+        (x, y) for y in range(r, height - r) for x in range(r, width - r)
+        if mask_grid[y * width + x] == 0 and valid_mask[y * width + x] == 1 and (channels != 4 or src_img[(y * width + x) * channels + 3] >= 128)
+    ]
     if not all_known:
         all_known = [(width // 2, height // 2)]
 

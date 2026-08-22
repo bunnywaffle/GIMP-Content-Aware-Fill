@@ -62,9 +62,10 @@ def propagate_structure_and_partition_zones(mask_analysis, perspective_model, st
     major_h_lines = clustered_h_lines[:3]
     res.propagated_lines = major_h_lines
 
-    # 2. Detect vertical frame boundary on left / right
+    # 2. Detect vertical architectural frame boundary on left / right (must span >= 60% of hole height)
     vert_frame_x = None
-    v_lines = [l for l in line_segments if abs(abs(l.angle) - math.pi * 0.5) < 0.2]
+    min_v_len = max(60.0, float(max_y - min_y) * 0.6)
+    v_lines = [l for l in line_segments if abs(abs(l.angle) - math.pi * 0.5) < 0.15 and l.length >= min_v_len]
     if v_lines:
         v_lines.sort(key=lambda l: l.strength, reverse=True)
         for vl in v_lines:
