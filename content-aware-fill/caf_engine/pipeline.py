@@ -129,9 +129,10 @@ def execute_content_aware_fill_pipeline(
         channels=channels, patch_radius=patch_radius
     )
 
-    # 10. Local Color & Exposure Adaptation
-    report(0.88, "Harmonizing local lighting & contrast...")
-    adapt_patch_colors(work_canvas, img_bytes, mask_res, width, height, channels, patch_radius)
+    # 10. Local Color & Exposure Adaptation (if requested)
+    if adaptation_mode != "none":
+        report(0.88, "Harmonizing local lighting & contrast...")
+        adapt_patch_colors(work_canvas, img_bytes, mask_res, width, height, channels, patch_radius)
 
     # 11. Gradient-Domain Screened Poisson Residual Healing
     report(0.93, "Solving harmonic boundary residual field...")

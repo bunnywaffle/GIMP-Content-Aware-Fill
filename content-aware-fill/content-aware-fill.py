@@ -623,6 +623,8 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                     progress_callback=progress_cb,
                 )
 
+            elapsed = time.time() - t0
+
             # Seamless Feathered Compositing: Preserves 100% of original pixels outside selection
             # and blends anti-aliased selection edges smoothly
             final_bytes = bytearray(img_bytes)
