@@ -3,18 +3,17 @@
 """
 CAF Engine Package
 ==================
-Modular Non-AI Classical Content-Aware Fill Pipeline for GIMP 3.
+Structure-First Modular Non-AI Classical Content-Aware Fill Pipeline for GIMP 3.
 """
 
 from .pipeline import execute_content_aware_fill_pipeline
 from .mask_analysis import analyze_mask
 from .structure_detection import compute_structure_maps
-from .structure_propagation import trace_structural_trajectories, compute_priority_front
-from .pyramid import build_image_pyramid, project_nnf_to_finer_scale
-from .patch_distance import PatchDistanceEvaluator
-from .transformations import get_standard_transformations
+from .line_perspective_model import detect_line_and_perspective_model
+from .structure_geometry import propagate_structure_and_partition_zones
+from .perspective_alignment import build_perspective_alignment
 from .source_selection import compute_source_suitability
-from .patchmatch import run_patchmatch_solver
+from .perspective_patchmatch import run_perspective_patchmatch
 from .global_consistency import optimize_global_consistency
 from .seam_optimization import optimize_patch_seams
 from .color_adaptation import adapt_patch_colors
@@ -25,14 +24,11 @@ __all__ = [
     "execute_content_aware_fill_pipeline",
     "analyze_mask",
     "compute_structure_maps",
-    "trace_structural_trajectories",
-    "compute_priority_front",
-    "build_image_pyramid",
-    "project_nnf_to_finer_scale",
-    "PatchDistanceEvaluator",
-    "get_standard_transformations",
+    "detect_line_and_perspective_model",
+    "propagate_structure_and_partition_zones",
+    "build_perspective_alignment",
     "compute_source_suitability",
-    "run_patchmatch_solver",
+    "run_perspective_patchmatch",
     "optimize_global_consistency",
     "optimize_patch_seams",
     "adapt_patch_colors",

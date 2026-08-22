@@ -161,7 +161,7 @@ def compute_source_suitability(
     ranked_shifts.sort(key=lambda item: item[0])
     dominant_shifts = [shift for _, shift in ranked_shifts[:12]]
 
-    for card_shift in [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h)]:
+    for card_shift in [(sel_w, 0), (-sel_w, 0), (0, sel_h), (0, -sel_h), (sel_w + 40, 0), (-sel_w - 40, 0), (0, sel_h + 40), (0, -sel_h - 40)]:
         if card_shift not in dominant_shifts:
             dominant_shifts.append(card_shift)
 
