@@ -623,10 +623,21 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
                     progress_callback=progress_cb,
                 )
 
-            elapsed = time.time() - t0
+            # Seamless Feathered Compositing: Preserves 100% of original pixels outside selection
+            # and blends anti-aliased selection edges smoothly
+            final_bytes = bytearray(img_bytes)
+            for idx in range(roi_w * roi_h):
+                m_val = mask_bytes[idx]
+                if m_val > 0:
+                    alpha_m = m_val / 255.0
+                    p = idx * channels
+                    for c in range(min(3, channels)):
+                        final_bytes[p + c] = max(0, min(255, int(round(inpainted_bytes[p + c] * alpha_m + img_bytes[p + c] * (1.0 - alpha_m)))))
+                    if channels == 4:
+                        final_bytes[p + 3] = 255
 
             # Commit directly to drawable buffer
-            drawable_buffer.set(layer_roi_rect, babl_format, bytes(inpainted_bytes))
+            drawable_buffer.set(layer_roi_rect, babl_format, bytes(final_bytes))
             drawable_buffer.flush()
             drawable.update(roi_x1, roi_y1, roi_w, roi_h)
 
