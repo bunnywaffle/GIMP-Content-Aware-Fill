@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 *.pyo
+*.log
 .DS_Store
 Thumbs.db
-*.log
+/.vscode/
+/.idea/
+caf_error.log
