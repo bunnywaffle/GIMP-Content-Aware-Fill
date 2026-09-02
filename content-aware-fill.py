@@ -278,8 +278,18 @@ class ContentAwareFillPlugin(Gimp.PlugIn):
             t0 = time.time()
             inpainted = engine_inpaint(img_bytes, mask_bytes, rw, rh, ch, patch_radius=settings["radius"], quality=settings["quality"], sample_source=settings["source"], progress_callback=progress_cb, blend_mode=settings["blend"], poisson_band=settings["poisson_band"], poisson_iters=settings["poisson_iters"], feather_width=settings["feather_width"], sampler_expand=settings["sampler_expand"])
             elapsed = time.time()-t0
-            # feather-free Poisson is already seamless, just direct write
-            dbuf.set(lay_rect, fmt, bytes(inpainted))
+            # Composite using selection anti-aliasing to guarantee zero edge steps
+            final_bytes = bytearray(img_bytes)
+            for idx in range(rw * rh):
+                m_val = mask_bytes[idx]
+                if m_val > 0:
+                    alpha_m = m_val / 255.0
+                    p = idx * ch
+                    for c in range(min(3, ch)):
+                        final_bytes[p + c] = max(0, min(255, int(round(inpainted[p + c] * alpha_m + img_bytes[p + c] * (1.0 - alpha_m)))))
+                    if ch == 4:
+                        final_bytes[p + 3] = 255
+            dbuf.set(lay_rect, fmt, bytes(final_bytes))
             dbuf.flush()
             drawable.update(rx1, ry1, rw, rh)
             if settings["deselect"]:
